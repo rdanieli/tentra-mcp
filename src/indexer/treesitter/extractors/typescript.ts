@@ -124,13 +124,35 @@ function walk(
     case 'call_expression': {
       const callee = node.childForFieldName('function')
       const calleeName = extractCalleeName(callee)
-      if (calleeName && currentOwner) {
+      // Emit call + reference edges from whichever owner is in scope.
+      // Top-level calls (e.g. server.tool('foo', ..., fooHandler) at file
+      // scope) fall back to FILE_OWNER so the target still gets fan-in.
+      const owner = currentOwner ?? FILE_OWNER
+      if (calleeName) {
         edges.push({
-          fromQualifiedName: currentOwner,
+          fromQualifiedName: owner,
           toQualifiedName: null,
           toExternal: calleeName,
           edgeType: 'call'
         })
+      }
+      // Reference edges: any argument that is a bare identifier or member
+      // expression refers to a symbol by name. Captures callback-passing
+      // patterns like server.tool('foo', schema, fooHandler) where fooHandler
+      // would otherwise show fan-in 0 because nothing calls it directly.
+      const argsNode = node.childForFieldName('arguments')
+      if (argsNode) {
+        for (const arg of argsNode.namedChildren) {
+          const refName = extractCalleeName(arg)
+          if (refName && refName !== calleeName) {
+            edges.push({
+              fromQualifiedName: owner,
+              toQualifiedName: null,
+              toExternal: refName,
+              edgeType: 'reference'
+            })
+          }
+        }
       }
       for (const child of node.namedChildren) {
         walk(child, currentOwner, symbols, edges)

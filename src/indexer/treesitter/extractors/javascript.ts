@@ -35,7 +35,21 @@ function walk(node: SyntaxNode, owner: string | null, symbols: ExtractedSymbol[]
       return
     }
     const name = extractCalleeName(callee)
-    if (name && owner) edges.push({ fromQualifiedName: owner, toQualifiedName: null, toExternal: name, edgeType: 'call' })
+    // Top-level calls (file scope) fall back to FILE_OWNER so callbacks
+    // still generate fan-in for the target symbol.
+    const from = owner ?? FILE_OWNER
+    if (name) edges.push({ fromQualifiedName: from, toQualifiedName: null, toExternal: name, edgeType: 'call' })
+    // Reference edges for callback-passed identifiers (e.g. server.tool('foo', schema, fooHandler)).
+    // Captures fan-in that would otherwise be lost.
+    const argsNode = node.childForFieldName('arguments')
+    if (argsNode) {
+      for (const arg of argsNode.namedChildren) {
+        const ref = extractCalleeName(arg)
+        if (ref && ref !== name) {
+          edges.push({ fromQualifiedName: from, toQualifiedName: null, toExternal: ref, edgeType: 'reference' })
+        }
+      }
+    }
     for (const c of node.namedChildren) walk(c, owner, symbols, edges)
     return
   }

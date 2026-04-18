@@ -2,6 +2,7 @@ import { z } from 'zod'
 import { readdir, readFile } from 'fs/promises'
 import { join, relative, resolve } from 'path'
 import { createHash } from 'crypto'
+import { execSync } from 'child_process'
 import {
   detectLanguage,
   TypeScriptExtractor,
@@ -77,8 +78,16 @@ export async function indexCodeHandler(raw: unknown): Promise<{ content: Array<{
     })
   }
 
-  // 2. Create snapshot
-  const snap = await apiPost<{ id: string }>('/code-graph/snapshots', { repoId: args.repo_id })
+  // 2. Create snapshot — capture the current git HEAD SHA so list_snapshots
+  // can show "freshness" relative to the caller's working tree. Best-effort:
+  // fall back to undefined if the path isn't a git repo.
+  let commitSha: string | undefined
+  try {
+    commitSha = execSync('git rev-parse HEAD', { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim()
+  } catch {
+    commitSha = undefined
+  }
+  const snap = await apiPost<{ id: string }>('/code-graph/snapshots', { repoId: args.repo_id, commitSha })
 
   // 2a. Upload files in chunks of 100 to avoid body-size limits; capture id mapping
   const FILE_CHUNK = 100
@@ -155,18 +164,24 @@ export async function indexCodeHandler(raw: unknown): Promise<{ content: Array<{
   // 2c. Upload edges — resolve qualifiedName → symbolId, with short-name fallback
   const EDGE_CHUNK = 500
   const edgesToUpload = [] as Array<{
-    fromSymbolId: string
+    fromSymbolId: string | null
     toSymbolId: string | null
     toExternal: string | null
     edgeType: string
   }>
   let resolvedViaShort = 0
+  let fileOwnerReferences = 0
   for (const fp of filePayloads) {
     for (const e of fp.extraction.edges) {
-      const fromId = qnToSymbolId.get(e.fromQualifiedName)
-      if (!fromId) continue // FILE_OWNER sentinel or orphan — skip (file-level edges not modeled here)
+      // Resolve `from`: either a real symbol or the FILE_OWNER sentinel.
+      // FILE_OWNER edges come from file-scope code (top-level `server.tool(...)`,
+      // module-level imports/calls). They contribute to the target's fanIn but
+      // no specific symbol gets fanOut credit.
+      const isFileOwnerFrom = e.fromQualifiedName === '<file>'
+      const fromId = isFileOwnerFrom ? null : (qnToSymbolId.get(e.fromQualifiedName) ?? null)
+      if (!isFileOwnerFrom && !fromId) continue // orphan — skip
 
-      // Resolution strategy (in order):
+      // Resolution strategy for `to` (in order):
       //   1. e.toQualifiedName directly in qnToSymbolId — fully qualified match
       //   2. e.toExternal matches exactly one symbol by short-name — unique cross-file match
       //   3. Else keep as external (toSymbolId=null, toExternal preserved)
@@ -183,6 +198,11 @@ export async function indexCodeHandler(raw: unknown): Promise<{ content: Array<{
           resolvedViaShort += 1
         }
       }
+      // Skip FILE_OWNER edges that resolved to nothing useful (no target).
+      // Those would just be noise on the edges table.
+      if (isFileOwnerFrom && !toId) continue
+      if (isFileOwnerFrom) fileOwnerReferences += 1
+
       edgesToUpload.push({
         fromSymbolId: fromId,
         toSymbolId: toId,
@@ -199,6 +219,9 @@ export async function indexCodeHandler(raw: unknown): Promise<{ content: Array<{
   // the unique-short-name heuristic was for this repo.
   if (resolvedViaShort > 0) {
     console.error(`[index_code] resolved ${resolvedViaShort} edges via short-name unique match`)
+  }
+  if (fileOwnerReferences > 0) {
+    console.error(`[index_code] captured ${fileOwnerReferences} file-scope reference edges (callback patterns → fanIn)`)
   }
 
   // 3. Create job

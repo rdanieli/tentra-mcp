@@ -8,6 +8,7 @@ import { IndexCodeContinueSchema, indexCodeContinueHandler } from './tools/code-
 import { RecordSemanticNodeSchema, recordSemanticNodeHandler } from './tools/code-index/record-semantic-node.js'
 import { GetIndexJobSchema, getIndexJobHandler } from './tools/code-index/get-index-job.js'
 import { QuerySymbolsSchema, querySymbolsHandler } from './tools/code-query/query-symbols.js'
+import { FindReferencesSchema, findReferencesHandler } from './tools/code-query/find-references.js'
 import { GetSymbolNeighborsSchema, getSymbolNeighborsHandler } from './tools/code-query/get-symbol-neighbors.js'
 import { GetServiceCodeGraphSchema, getServiceCodeGraphHandler } from './tools/code-query/get-service-code-graph.js'
 import { ExplainCodePathSchema, explainCodePathHandler } from './tools/code-query/explain-code-path.js'
@@ -693,9 +694,18 @@ server.tool(
 
 server.tool(
   'query_symbols',
-  'Search for symbols by name or qualified name using fuzzy trigram matching. Replaces 10+ grep calls. Returns symbol kind, file path, fan-in/out, semantic role.',
+  'Search for symbols by name or qualified name. Default mode="trigram" for fuzzy lookups. Pass mode="substring" for broad listings like "Handler" or "Controller" (ranked by fan-in+fan-out). Replaces 10+ grep calls. Returns symbol kind, file path, fan-in/out, semantic role.',
   QuerySymbolsSchema.shape,
   async (args) => { await ensureAuth(); return querySymbolsHandler(args) }
+)
+
+// ─── Tool: find_references ───────────────────────────────────────────────────
+
+server.tool(
+  'find_references',
+  'Find every location that references a symbol — the refactor-safety tool. Returns resolved call/import/reference edges (from graph) and optionally unresolved short-name matches. Use before a rename to see every caller, or before deletion to confirm nothing depends on it. Safer than grep for TypeScript/JavaScript because it follows the call graph, not just text.',
+  FindReferencesSchema.shape,
+  async (args) => { await ensureAuth(); return findReferencesHandler(args) }
 )
 
 // ─── Tool: get_symbol_neighbors ──────────────────────────────────────────────

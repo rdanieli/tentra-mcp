@@ -6,14 +6,18 @@ Memory for AI coding agents. Persistent code graph + AI-generated architecture d
 
 Dogfood benchmark on our own monorepo: **99.4% token reduction** (156.8× ratio) across 8 "where is X implemented?" queries — 114,644 tokens via file re-read vs 731 tokens via `query_symbols`. [Full write-up →](https://trytentra.com/blog/we-measured-99-percent-token-savings-with-a-code-graph)
 
-## Quick Start
+## Quick Start (60 seconds)
 
 ```bash
 cd your-repo
-npx tentra-mcp init
+npx tentra-mcp init --hook
 ```
 
-One command. Detects the repo, writes MCP config for Cursor, Claude Code, Codex, and Windsurf, and prints the 3 next steps. Idempotent — re-run it safely.
+One command:
+
+1. Writes MCP config for **Cursor / Claude Code / Codex / Windsurf** (whichever are installed)
+2. Installs a git `post-commit` hook so the code graph auto-refreshes after every commit — no manual re-indexing
+3. Auto-derives your `repo_id` from the git remote and saves it to `.tentra/metadata.json`
 
 Then grab your API key at [trytentra.com/settings](https://trytentra.com/settings), replace `YOUR_TENTRA_API_KEY` in the generated config, reload your IDE, and ask your agent:
 
@@ -21,6 +25,9 @@ Then grab your API key at [trytentra.com/settings](https://trytentra.com/setting
 Index this codebase with Tentra and list the god-nodes
 ```
 
+From here on, every `git commit` fires a background re-index. Your agents stay caught up automatically.
+
+> **Skip the hook:** drop `--hook` — just writes IDE configs.
 > **Manual stdio install:** `npx tentra-mcp` (opens browser for GitHub device-flow auth on first tool call).
 > **API key instead:** `npx tentra-mcp --key YOUR_API_KEY`.
 

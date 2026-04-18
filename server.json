@@ -1,0 +1,36 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.rdanieli/tentra",
+  "title": "Tentra — Memory for AI Coding Agents",
+  "description": "Memory for AI coding agents. Persistent code graph + AI architecture diagrams. 32 MCP tools.",
+  "repository": {
+    "url": "https://github.com/rdanieli/tentra-mcp",
+    "source": "github"
+  },
+  "version": "1.2.0",
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "tentra-mcp",
+      "version": "1.2.0",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "description": "Tentra API key (optional — device flow auth via GitHub is used by default)",
+          "isRequired": false,
+          "format": "string",
+          "isSecret": true,
+          "name": "TENTRA_API_KEY"
+        }
+      ]
+    }
+  ],
+  "remotes": [
+    {
+      "type": "sse",
+      "url": "https://trytentra.com/api/mcp"
+    }
+  ]
+}

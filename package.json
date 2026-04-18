@@ -1,0 +1,73 @@
+{
+  "name": "tentra-mcp",
+  "version": "1.2.0",
+  "description": "Tentra MCP — memory for AI coding agents. Persistent code graph + AI-generated architecture diagrams. 32 tools for Cursor, Claude Code, Codex, Windsurf.",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "tentra-mcp": "bin/tentra-mcp.js"
+  },
+  "files": [
+    "dist",
+    "bin",
+    "README.md"
+  ],
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "architecture",
+    "ai",
+    "cursor",
+    "claude-code",
+    "codex",
+    "windsurf",
+    "tentra",
+    "diagram",
+    "code-generation",
+    "software-architecture",
+    "code-graph",
+    "agent-memory",
+    "persistent-context",
+    "token-optimization"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/rdanieli/tentra-mcp.git"
+  },
+  "mcpName": "io.github.rdanieli/tentra",
+  "homepage": "https://trytentra.com",
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc --noEmit && node scripts/bundle.mjs",
+    "start": "node dist/index.js",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "npm run build"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.10.2",
+    "@readme/openapi-parser": "^6.0.1",
+    "protobufjs": "^8.0.1",
+    "tree-sitter": "^0.22.4",
+    "tree-sitter-typescript": "^0.23.2",
+    "tree-sitter-javascript": "^0.23.1",
+    "tree-sitter-python": "^0.23.6",
+    "tree-sitter-go": "^0.23.4",
+    "tree-sitter-java": "^0.23.5",
+    "tree-sitter-rust": "^0.23.2",
+    "yaml": "^2.8.3",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.2",
+    "esbuild": "^0.24.0",
+    "tsx": "^4.15.6",
+    "typescript": "^5.4.5",
+    "vitest": "^2.0.0"
+  }
+}

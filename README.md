@@ -1,0 +1,171 @@
+# tentra-mcp
+
+Memory for AI coding agents. Persistent code graph + AI-generated architecture diagrams — MCP-native. Works in Cursor, Claude Code, Codex, and Windsurf.
+
+## Quick Start
+
+```bash
+npx tentra-mcp
+```
+
+On first use, your browser opens for one-click GitHub sign-in. That's it — no API key needed.
+
+> **Advanced:** If you prefer to use an API key directly, run `npx tentra-mcp --key YOUR_API_KEY`. Get your key at [trytentra.com/settings](https://trytentra.com/settings).
+
+## What is Tentra?
+
+Tentra is the persistent memory layer for AI coding agents. Describe a system — get a diagram and 14-framework code exports. Index your repo — agents query a structured graph of files, symbols, imports, and call edges instead of re-grepping source every session.
+
+This MCP server gives your AI assistant **32 tools**:
+
+### Architecture (9 tools)
+| Tool | Description |
+|------|-------------|
+| `create_architecture` | Design a new system from a description |
+| `update_architecture` | Modify an existing architecture |
+| `get_architecture` | Read architecture details |
+| `list_architectures` | Browse all saved designs |
+| `analyze_codebase` | Scan local code and generate diagram |
+| `lint_architecture` | Quality checks (9 rules: orphans, SPOFs, god services) |
+| `sync_architecture` | Detect drift between diagram and code |
+| `export_architecture` | Export to 14 frameworks (Java, Python, Go, Rust, etc.) |
+| `create_flow` | Create step-by-step flow visualization |
+
+### Code Graph — Write (4 tools)
+| Tool | Description |
+|------|-------------|
+| `index_code` | Walk a repo, Tree-sitter locally, start a semantic indexing job |
+| `index_code_continue` | Resume an in-progress indexing job |
+| `record_semantic_node` | Persist an agent-extracted semantic annotation |
+| `get_index_job` | Check status of an indexing job |
+
+### Code Graph — Read (10 tools)
+| Tool | Description |
+|------|-------------|
+| `query_symbols` | Fuzzy trigram search across indexed symbols |
+| `get_symbol_neighbors` | BFS traversal in the call/import graph |
+| `get_service_code_graph` | Subgraph for a canvas service |
+| `explain_code_path` | Shortest path between two symbols with semantic context |
+| `find_similar_code` | pgvector cosine ANN over agent-generated embeddings |
+| `record_embedding` | Persist an agent-generated embedding vector |
+| `list_god_nodes` | Highest fan-in/out symbols (architectural smells) |
+| `get_quality_hotspots` | Churn × complexity ranking |
+| `list_snapshots` | Time-travel listing of indexed snapshots |
+| `diff_snapshots` | Files / symbols / god-nodes added/removed between snapshots |
+
+### Enrichment — Contracts, Decisions, Ownership, Domains (9 tools)
+| Tool | Description |
+|------|-------------|
+| `set_service_mapping` | Link an indexed file or symbol to a canvas service |
+| `set_domain_membership` | Assign a service or file to a domain (bounded context) |
+| `record_contract` | Store a parsed API contract payload (OpenAPI, GraphQL, Protobuf) |
+| `bind_contract` | Link a contract to the symbol that implements it |
+| `record_decision` | Create an Architecture Decision Record, optionally linking code |
+| `link_decision` | Append a link from an ADR to another symbol, file, or service |
+| `get_ownership` | Resolve the owner (team or person) for a file or service |
+| `get_decisions_for` | List ADRs linked to a given entity |
+| `get_contracts` | List contracts, optionally filtered by kind or service |
+
+## Setup
+
+### Option 1: SSE (zero install)
+
+Add to your IDE's MCP config — no local install needed:
+
+**Cursor** (Settings > Features > MCP > Add Server):
+```json
+{
+  "tentra": {
+    "type": "sse",
+    "url": "https://trytentra.com/api/mcp?key=YOUR_API_KEY"
+  }
+}
+```
+
+**Claude Code** (`.mcp.json` in project root):
+```json
+{
+  "mcpServers": {
+    "tentra": {
+      "type": "sse",
+      "url": "https://trytentra.com/api/mcp?key=YOUR_API_KEY"
+    }
+  }
+}
+```
+
+### Option 2: Local install (needed for codebase scanning)
+
+```bash
+npx tentra-mcp
+```
+
+Authenticates automatically via GitHub on first use. Credentials are saved to `~/.tentra/credentials`.
+
+**Cursor** config for local server:
+```json
+{
+  "tentra": {
+    "command": "npx",
+    "args": ["tentra-mcp"]
+  }
+}
+```
+
+**Claude Code** (`.mcp.json`):
+```json
+{
+  "mcpServers": {
+    "tentra": {
+      "command": "npx",
+      "args": ["tentra-mcp"]
+    }
+  }
+}
+```
+
+## Usage Examples
+
+Once connected, just talk to your AI:
+
+```
+"Design a payment system with Stripe, Kafka, and PostgreSQL"
+→ AI calls create_architecture → diagram at trytentra.com/arch/xxx
+
+"Scan this codebase and generate the architecture"
+→ AI calls analyze_codebase → detects services, DBs, queues
+
+"Export this architecture to Java Spring Boot"
+→ AI calls export_architecture → downloads zip with project scaffold
+
+"What changed since last time? Is my diagram outdated?"
+→ AI calls sync_architecture → drift report with accuracy score
+```
+
+## Export Formats
+
+Java (Spring Boot), Node.js (Fastify), Python (FastAPI), Go (chi), Rust (Axum), .NET (ASP.NET), Kotlin (Ktor), PHP (Laravel), Ruby (Rails), Elixir (Phoenix), Docker Compose, Mermaid, ADR, Terraform
+
+## Links
+
+- Website: [trytentra.com](https://trytentra.com)
+- Documentation: [trytentra.com/docs](https://trytentra.com/docs)
+- Setup Guide: [trytentra.com/docs/setup](https://trytentra.com/docs/setup)
+- Gallery: [trytentra.com/gallery](https://trytentra.com/gallery)
+
+## Development
+
+This repo contains the open-source MCP server. The Tentra API and web app are a separate hosted service at [trytentra.com](https://trytentra.com).
+
+```bash
+npm install --legacy-peer-deps
+npm run build      # tsc --noEmit + esbuild bundle → dist/index.js
+npm start          # run the bundled server
+npm test           # vitest
+```
+
+The published npm package (`tentra-mcp`) ships only the bundled `dist/` — source is here for auditability and community contributions.
+
+## License
+
+MIT

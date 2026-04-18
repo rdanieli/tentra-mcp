@@ -1,6 +1,10 @@
 # tentra-mcp
 
+[![npm version](https://img.shields.io/npm/v/tentra-mcp.svg)](https://www.npmjs.com/package/tentra-mcp) [![npm downloads](https://img.shields.io/npm/dw/tentra-mcp.svg)](https://www.npmjs.com/package/tentra-mcp) [![CI](https://github.com/rdanieli/tentra-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/rdanieli/tentra-mcp/actions/workflows/ci.yml) [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 Memory for AI coding agents. Persistent code graph + AI-generated architecture diagrams — MCP-native. Works in Cursor, Claude Code, Codex, and Windsurf.
+
+Dogfood benchmark on our own monorepo: **99.4% token reduction** (156.8× ratio) across 8 "where is X implemented?" queries — 114,644 tokens via file re-read vs 731 tokens via `query_symbols`. [Full write-up →](https://trytentra.com/blog/we-measured-99-percent-token-savings-with-a-code-graph)
 
 ## Quick Start
 

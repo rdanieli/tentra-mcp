@@ -37,6 +37,15 @@ const EXTRACTORS = {
 
 const IGNORED = new Set(['node_modules', '.git', 'dist', 'build', '.next', '__pycache__', 'target', 'vendor'])
 
+// Tag symbols defined in test / fixture / e2e files so queries can filter
+// them out by default. Heuristic matches both directory-based and filename-
+// based conventions (*.test.ts, *.spec.ts, tests/, __tests__/, fixtures/).
+function isTestPath(relativePath: string): boolean {
+  return /(^|\/)(tests?|__tests__|fixtures|e2e)\//i.test(relativePath)
+      || /\.(test|spec)\.[a-z]+$/i.test(relativePath)
+      || /(^|\/)test-[^/]+$/i.test(relativePath)
+}
+
 async function walkRepo(root: string): Promise<string[]> {
   const found: string[] = []
   async function visit(dir: string) {
@@ -60,7 +69,7 @@ export async function indexCodeHandler(raw: unknown): Promise<{ content: Array<{
 
   // 1. Walk repo & build tier-1 payloads
   const absPaths = await walkRepo(root)
-  const filePayloads: Array<{ relativePath: string; language: string; loc: number; contentHash: string; serviceId?: string; extraction: ExtractionResult }> = []
+  const filePayloads: Array<{ relativePath: string; language: string; loc: number; contentHash: string; serviceId?: string; isTest: boolean; extraction: ExtractionResult }> = []
   for (const abs of absPaths) {
     const rel = relative(root, abs)
     const lang = detectLanguage(abs) as SupportedLanguage | 'unknown'
@@ -74,6 +83,7 @@ export async function indexCodeHandler(raw: unknown): Promise<{ content: Array<{
       loc: extraction.loc,
       contentHash: createHash('sha1').update(src).digest('hex'),
       serviceId: args.service_id,
+      isTest: isTestPath(rel),
       extraction
     })
   }

@@ -10,6 +10,8 @@ export const QuerySymbolsSchema = z.object({
   role: z.string().optional().describe('Filter by semantic role slug (e.g. "service", "repository")'),
   mode: z.enum(['trigram', 'substring']).default('trigram')
     .describe('Match mode. "trigram" (default) ranks by pg_trgm similarity — best for fuzzy / unique lookups. "substring" uses ILIKE %q% — best for broad listings like "Handler" or "Controller"; results ranked by fan-in + fan-out.'),
+  exclude_tests: z.boolean().default(true)
+    .describe('Hide symbols defined in test/fixture files (default true)'),
   limit: z.number().int().positive().max(100).default(50)
     .describe('Max results to return (default 50)')
 })
@@ -20,6 +22,7 @@ export async function querySymbolsHandler(raw: unknown) {
     snapshot_id: args.snapshot_id,
     q: args.q,
     mode: args.mode,
+    exclude_tests: String(args.exclude_tests),
     limit: String(args.limit)
   })
   if (args.kind) params.set('kind', args.kind)

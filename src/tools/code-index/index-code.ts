@@ -35,6 +35,27 @@ const EXTRACTORS = {
   rust:       new RustExtractor()
 } as const
 
+// Common local/parameter identifier names that virtually never correspond to
+// real exported symbols. Skip cross-file short-name resolution for `reference`
+// edges whose toExternal matches one of these — otherwise `catch (err) { fn(err) }`
+// falsely inflates the fanIn of any `err` symbol that happens to exist.
+const COMMON_PARAM_NAMES = new Set([
+  // Single letters
+  'i', 'j', 'k', 'n', 's', 'e', 'v', 'x', 'y', 'z', 'a', 'b', 'c', 'd',
+  // Error / exception params
+  'err', 'ex', 'exc', 'error',
+  // Callback / promise params
+  'cb', 'done', 'next', 'resolve', 'reject',
+  // Request/response in web handlers
+  'req', 'res', 'ctx',
+  // Data / value generics
+  'data', 'val', 'value', 'key', 'obj', 'arr', 'str', 'num', 'raw',
+  // Collection iteration
+  'item', 'el', 'elem', 'node', 'child', 'parent', 'row', 'col',
+  // Misc
+  'args', 'opts', 'arg', 'msg', 'buf', 'tmp', 'idx', 'len', 'out', 'fn'
+])
+
 const IGNORED = new Set([
   'node_modules', '.git', 'dist', 'build', '.next', '__pycache__', 'target', 'vendor',
   // Agent-worktree scratch dirs created by tools like Claude Code Superpowers.
@@ -200,6 +221,7 @@ export async function indexCodeHandler(raw: unknown): Promise<{ content: Array<{
   let resolvedSameFile = 0
   let methodCallsSkipped = 0
   let fileOwnerReferences = 0
+  let paramRefsSkipped = 0
   for (const fp of filePayloads) {
     const fileId = pathToFileId.get(fp.relativePath) ?? ''
     for (const e of fp.extraction.edges) {
@@ -229,6 +251,22 @@ export async function indexCodeHandler(raw: unknown): Promise<{ content: Array<{
       if (!toId && e.toExternal && e.edgeType === 'method_call') {
         // Method call with no qualified-name hit — don't guess. Count and skip.
         methodCallsSkipped += 1
+      } else if (!toId && e.toExternal && e.edgeType === 'reference' && COMMON_PARAM_NAMES.has(e.toExternal)) {
+        // Common parameter/local names (`err`, `e`, `data`, `req`, …) are almost
+        // never real exported symbols. `catch (err) { fn(err) }` emits a reference
+        // edge to `err`; without this guard, a lone `err` helper somewhere in the
+        // repo would absorb every caller's fanIn via the unique cross-file fallback.
+        // Same-file resolution stays enabled (a legit local `err` helper in the
+        // same file still resolves — that's the correct local binding).
+        const sameFile = (shortNameToCandidates.get(e.toExternal) ?? []).filter(c => c.fileId === fileId)
+        if (sameFile.length === 1) {
+          toId = sameFile[0].id
+          toExternal = null
+          resolvedSameFile += 1
+        } else {
+          paramRefsSkipped += 1
+        }
+        // No cross-file fallback for blocklisted names — leaves edge external.
       } else if (!toId && e.toExternal) {
         const candidates = shortNameToCandidates.get(e.toExternal)
         if (candidates && candidates.length > 0) {
@@ -278,6 +316,9 @@ export async function indexCodeHandler(raw: unknown): Promise<{ content: Array<{
   }
   if (fileOwnerReferences > 0) {
     console.error(`[index_code] captured ${fileOwnerReferences} file-scope reference edges (callback patterns → fanIn)`)
+  }
+  if (paramRefsSkipped > 0) {
+    console.error(`[index_code] skipped ${paramRefsSkipped} reference edges to common param names (err/e/data/req/... — blocklist)`)
   }
 
   // 3. Create job

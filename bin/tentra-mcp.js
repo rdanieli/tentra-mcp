@@ -112,6 +112,66 @@ if (subcommand === 'init') {
     }
   }
 
+  // ── GitHub Actions PR review workflow (opt-in via --ci) ────────────────────
+  const installCi = hasFlag('ci')
+  if (installCi) {
+    log('')
+    log('\x1b[1mInstalling GitHub Actions PR review workflow\x1b[0m')
+    const workflowPath = join(root, '.github', 'workflows', 'tentra-review.yml')
+    if (existsSync(workflowPath)) {
+      info(`workflow already exists: ${workflowPath}`)
+    } else {
+      const workflow = `name: Tentra PR Review
+
+# Automated architectural review on every PR. Posts a markdown comment
+# summarizing what changed, new god-nodes, hotspots, and architectural drift.
+# Requires: TENTRA_API_KEY secret (get yours at ${webUrl}/settings).
+
+on:
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # need history for base/HEAD diffs
+
+      - uses: actions/setup-node@v4
+        with: { node-version: 20 }
+
+      # Index the PR base first so there's a snapshot to diff against.
+      - name: Index base (\${{ github.base_ref }})
+        run: git checkout \${{ github.base_ref }} && npx tentra-mcp@latest reindex --quiet
+        env:
+          TENTRA_API_KEY: \${{ secrets.TENTRA_API_KEY }}
+
+      # Back to PR HEAD and generate the review markdown.
+      - name: Review PR HEAD (\${{ github.head_ref }})
+        id: review
+        run: |
+          git checkout \${{ github.head_ref }}
+          npx tentra-mcp@latest review > /tmp/review.md
+        env:
+          TENTRA_API_KEY: \${{ secrets.TENTRA_API_KEY }}
+
+      - name: Post review as PR comment
+        env:
+          GH_TOKEN: \${{ secrets.GITHUB_TOKEN }}
+        run: gh pr comment \${{ github.event.pull_request.number }} --body-file /tmp/review.md
+`
+      mkdirSync(dirname(workflowPath), { recursive: true })
+      writeFileSync(workflowPath, workflow)
+      ok(`workflow: ${workflowPath}`)
+      info(`Set TENTRA_API_KEY as a repo secret: ${webUrl}/settings`)
+    }
+  }
+
   // ── Post-commit hook (opt-in via --hook) ────────────────────────────────────
   if (installHook) {
     log('')
@@ -252,8 +312,147 @@ function runReindex() {
   send({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'index_code', arguments: { repo_path: root, repo_id: repoId, tier: 'tier1', force_reindex: true } } })
 }
 
+// ─── Subcommand: review — markdown summary of what changed since last snapshot ──
+
+async function runReview() {
+  const root = findRepoRoot(process.cwd())
+  const metadataPath = join(root, '.tentra', 'metadata.json')
+  const metadata = readJsonIfExists(metadataPath)
+
+  const url = getFlag('url') || metadata?.apiUrl || process.env.API_URL || 'https://trytentra.com/api'
+  const repoId = getFlag('repo-id') || metadata?.repoId
+  const apiKey = getFlag('key') || process.env.TENTRA_API_KEY
+  const baseSnapshotArg = getFlag('base-snapshot')
+
+  if (!repoId) {
+    err('No repo_id. Run `npx tentra-mcp init --hook` first, or pass --repo-id.')
+    process.exit(1)
+  }
+  if (!apiKey) {
+    err('No API key. Pass --key or set TENTRA_API_KEY.')
+    process.exit(1)
+  }
+
+  const fetchJson = async (path) => {
+    const res = await fetch(`${url}${path}`, { headers: { 'X-API-Key': apiKey } })
+    if (!res.ok) throw new Error(`${path} → ${res.status} ${res.statusText}`)
+    return res.json()
+  }
+
+  // Reindex current HEAD to get a fresh snapshot.
+  const serverPath = join(dirname(fileURLToPath(import.meta.url)), '..', 'dist', 'index.js')
+  const child = spawn('node', [serverPath], {
+    cwd: root, env: { ...process.env, TENTRA_API_KEY: apiKey, API_URL: url, WEB_URL: url.replace('/api', '') },
+    stdio: ['pipe', 'pipe', 'ignore']
+  })
+  const newSnapId = await new Promise((resolve, reject) => {
+    let buffer = ''
+    const timer = setTimeout(() => { child.kill(); reject(new Error('index timed out')) }, 5 * 60 * 1000)
+    child.stdout.on('data', (chunk) => {
+      buffer += chunk.toString()
+      let nl
+      while ((nl = buffer.indexOf('\n')) !== -1) {
+        const line = buffer.slice(0, nl); buffer = buffer.slice(nl + 1)
+        if (!line.trim().startsWith('{')) continue
+        try {
+          const msg = JSON.parse(line)
+          if (msg.id === 2 && msg.result?.content?.[0]?.text) {
+            clearTimeout(timer); child.kill()
+            const body = JSON.parse(msg.result.content[0].text)
+            resolve(body.snapshot_id)
+          } else if (msg.id === 2 && msg.error) {
+            clearTimeout(timer); child.kill()
+            reject(new Error(msg.error.message || JSON.stringify(msg.error)))
+          }
+        } catch {}
+      }
+    })
+    const send = (obj) => child.stdin.write(JSON.stringify(obj) + '\n')
+    send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'tentra-review', version: '1' } } })
+    send({ jsonrpc: '2.0', method: 'notifications/initialized' })
+    send({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'index_code', arguments: { repo_path: root, repo_id: repoId, tier: 'tier1', force_reindex: true } } })
+  })
+
+  // Pick base snapshot: explicit arg wins; else second-most-recent for this repo.
+  const snapList = await fetchJson(`/code-graph/query/snapshots/${encodeURIComponent(repoId)}`)
+  const snaps = snapList.snapshots || []
+  const baseSnap = baseSnapshotArg || snaps.find(s => s.id !== newSnapId)?.id
+  if (!baseSnap) {
+    // First-ever index — emit a "welcome" review instead of a diff.
+    const godNodes = await fetchJson(`/code-graph/query/god-nodes?snapshot_id=${newSnapId}&top_n=5`)
+    console.log(renderWelcomeReview(newSnapId, godNodes))
+    process.exit(0)
+  }
+
+  const [diff, godNodes] = await Promise.all([
+    fetchJson(`/code-graph/query/diff?from_id=${baseSnap}&to_id=${newSnapId}`),
+    fetchJson(`/code-graph/query/god-nodes?snapshot_id=${newSnapId}&top_n=5`)
+  ])
+  console.log(renderDiffReview({ baseSnap, newSnapId, diff, godNodes, webUrl: url.replace('/api', '') }))
+  process.exit(0)
+}
+
+function renderWelcomeReview(snapId, godNodes) {
+  const gods = (godNodes.godNodes || []).map(g =>
+    `- **${g.qualifiedName}** (fanIn ${g.fanIn}, fanOut ${g.fanOut}) · \`${g.filePath}\``
+  ).join('\n')
+  return `## 🧩 Tentra Review
+
+First indexed snapshot for this repo — no prior state to diff against. Snapshot: \`${snapId}\`.
+
+**Top 5 architectural hotspots (by fanIn + fanOut):**
+
+${gods || '_No symbols indexed yet._'}
+
+_Commit to create more snapshots. Future reviews will diff against the previous snapshot._`
+}
+
+function renderDiffReview({ baseSnap, newSnapId, diff, godNodes, webUrl }) {
+  const files = diff.files || {}
+  const symbols = diff.symbols || {}
+  const godDiff = diff.godNodes || {}
+
+  const filesSection = [
+    files.added?.length ? `**Added files (${files.added.length}):**\n${files.added.slice(0, 10).map(p => `- \`${p}\``).join('\n')}${files.added.length > 10 ? `\n- _…and ${files.added.length - 10} more_` : ''}` : null,
+    files.removed?.length ? `**Removed files (${files.removed.length}):**\n${files.removed.slice(0, 10).map(p => `- \`${p}\``).join('\n')}${files.removed.length > 10 ? `\n- _…and ${files.removed.length - 10} more_` : ''}` : null,
+    files.modified?.length ? `**Modified files (${files.modified.length}):**\n${files.modified.slice(0, 10).map(p => `- \`${p}\``).join('\n')}${files.modified.length > 10 ? `\n- _…and ${files.modified.length - 10} more_` : ''}` : null
+  ].filter(Boolean).join('\n\n') || '_No file changes._'
+
+  const symbolsSection = [
+    symbols.added?.length ? `**Symbols added (${symbols.added.length}):** ${symbols.added.slice(0, 15).map(s => `\`${s}\``).join(', ')}${symbols.added.length > 15 ? ` _+${symbols.added.length - 15} more_` : ''}` : null,
+    symbols.removed?.length ? `**Symbols removed (${symbols.removed.length}):** ${symbols.removed.slice(0, 15).map(s => `\`${s}\``).join(', ')}${symbols.removed.length > 15 ? ` _+${symbols.removed.length - 15} more_` : ''}` : null
+  ].filter(Boolean).join('\n') || null
+
+  const godsSection = [
+    godDiff.appeared?.length ? `⚠️ **New god-nodes (${godDiff.appeared.length})** — newly-high fan-in/out symbols. Review for architectural concerns:\n${godDiff.appeared.slice(0, 5).map(s => `- \`${s}\``).join('\n')}` : null,
+    godDiff.resolved?.length ? `✅ **Resolved god-nodes (${godDiff.resolved.length})** — no longer hotspots: ${godDiff.resolved.slice(0, 5).map(s => `\`${s}\``).join(', ')}` : null
+  ].filter(Boolean).join('\n\n') || null
+
+  const hotspots = (godNodes.godNodes || []).slice(0, 5).map(g =>
+    `- **${g.qualifiedName}** (fanIn ${g.fanIn}, fanOut ${g.fanOut}) · \`${g.filePath}\``
+  ).join('\n')
+
+  return `## 🧩 Tentra Review
+
+Diff: \`${baseSnap}\` → \`${newSnapId}\`
+
+### Files changed
+
+${filesSection}
+
+${symbolsSection ? `### Symbols\n\n${symbolsSection}\n` : ''}${godsSection ? `\n### Architectural signals\n\n${godsSection}\n` : ''}
+### Current top hotspots
+
+${hotspots || '_No symbols._'}
+
+---
+_Generated by [Tentra](${webUrl}) — persistent code graph for AI coding agents._`
+}
+
 if (subcommand === 'reindex') {
   runReindex()
+} else if (subcommand === 'review') {
+  runReview().catch((e) => { err(e.message || String(e)); process.exit(1) })
 } else if (subcommand === 'help' || args.includes('--help') || args.includes('-h')) {
   console.log(`
   tentra-mcp — Memory for AI coding agents. Persistent code graph + AI architecture diagrams.
@@ -262,6 +461,7 @@ if (subcommand === 'reindex') {
     npx tentra-mcp init                     # zero-config install for this repo's IDE(s)
     npx tentra-mcp init --hook              # also install git post-commit auto-reindex
     npx tentra-mcp reindex                  # manual re-index (reads .tentra/metadata.json)
+    npx tentra-mcp review                   # markdown diff review — pipe to gh pr comment
     npx tentra-mcp                          # start the MCP stdio server
     npx tentra-mcp --key YOUR_API_KEY       # start with an existing API key
 
@@ -271,8 +471,11 @@ if (subcommand === 'reindex') {
                    hook that keeps the code graph fresh automatically.
     reindex        Re-index this repo using the stored repo_id. Designed to run
                    non-interactively from a git hook or CI.
+    review         Re-index HEAD, diff against the previous snapshot, print a
+                   Markdown review to stdout. Pipe to \`gh pr comment -F -\` in
+                   your CI to get auto-review on every PR.
     (default)      Start the MCP stdio server — connects to https://trytentra.com
-                   and exposes 32 tools to your IDE over stdio.
+                   and exposes 33 tools to your IDE over stdio.
 
   OPTIONS:
     --key <key>      Tentra API key. Without it, device-flow auth runs on first
@@ -283,13 +486,14 @@ if (subcommand === 'reindex') {
     --quiet          (reindex only) Suppress informational output
     --help, -h       Show this help
 
-  32 MCP TOOLS:
-    Architecture (9):   create / update / get / list / analyze / lint / sync / export / flow
+  33 MCP TOOLS:
+    Architecture (9):      create / update / get / list / analyze / lint / sync / export / flow
     Code graph write (4):  index_code, index_code_continue, record_semantic_node, get_index_job
-    Code graph read (10):  query_symbols, get_symbol_neighbors, get_service_code_graph,
-                           explain_code_path, find_similar_code, record_embedding,
-                           list_god_nodes, get_quality_hotspots, list_snapshots, diff_snapshots
-    Enrichment (9):     contracts, decisions, ownership, domains
+    Code graph read (11):  query_symbols, find_references, get_symbol_neighbors,
+                           get_service_code_graph, explain_code_path, find_similar_code,
+                           record_embedding, list_god_nodes, get_quality_hotspots,
+                           list_snapshots, diff_snapshots
+    Enrichment (9):        contracts, decisions, ownership, domains
 
   GETTING STARTED (60-second version):
     1. cd into your repo

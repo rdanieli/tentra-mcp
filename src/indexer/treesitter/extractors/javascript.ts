@@ -35,10 +35,16 @@ function walk(node: SyntaxNode, owner: string | null, symbols: ExtractedSymbol[]
       return
     }
     const name = extractCalleeName(callee)
+    // Distinguish bare calls (`log(x)`) from method calls (`console.log(x)`).
+    // Method calls depend on the runtime type of the receiver, which we
+    // cannot resolve statically — tagging them separately lets the resolver
+    // skip the same-file / cross-file short-name fallbacks that would
+    // otherwise glue every `console.log` onto an unrelated `log` symbol.
+    const isMethodCall = callee?.type === 'member_expression'
     // Top-level calls (file scope) fall back to FILE_OWNER so callbacks
     // still generate fan-in for the target symbol.
     const from = owner ?? FILE_OWNER
-    if (name) edges.push({ fromQualifiedName: from, toQualifiedName: null, toExternal: name, edgeType: 'call' })
+    if (name) edges.push({ fromQualifiedName: from, toQualifiedName: null, toExternal: name, edgeType: isMethodCall ? 'method_call' : 'call' })
     // Reference edges for callback-passed identifiers (e.g. server.tool('foo', schema, fooHandler)).
     // Captures fan-in that would otherwise be lost.
     const argsNode = node.childForFieldName('arguments')

@@ -4,7 +4,7 @@ export type SupportedLanguage =
 export type DetectedLanguage = SupportedLanguage | 'unknown'
 
 export type SymbolKind = 'function' | 'class' | 'method' | 'interface' | 'variable' | 'type'
-export type EdgeType = 'call' | 'import' | 'inherit' | 'implement' | 'reference'
+export type EdgeType = 'call' | 'method_call' | 'import' | 'inherit' | 'implement' | 'reference'
 
 export interface ExtractedSymbol {
   kind: SymbolKind

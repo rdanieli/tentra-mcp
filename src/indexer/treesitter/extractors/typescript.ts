@@ -124,6 +124,12 @@ function walk(
     case 'call_expression': {
       const callee = node.childForFieldName('function')
       const calleeName = extractCalleeName(callee)
+      // Distinguish bare calls (`log(x)`) from method calls (`console.log(x)`).
+      // Method calls depend on the runtime type of the receiver, which we
+      // cannot resolve statically — tagging them separately lets the resolver
+      // skip the same-file / cross-file short-name fallbacks that would
+      // otherwise glue every `console.log` onto an unrelated `log` symbol.
+      const isMethodCall = callee?.type === 'member_expression'
       // Emit call + reference edges from whichever owner is in scope.
       // Top-level calls (e.g. server.tool('foo', ..., fooHandler) at file
       // scope) fall back to FILE_OWNER so the target still gets fan-in.
@@ -133,7 +139,7 @@ function walk(
           fromQualifiedName: owner,
           toQualifiedName: null,
           toExternal: calleeName,
-          edgeType: 'call'
+          edgeType: isMethodCall ? 'method_call' : 'call'
         })
       }
       // Reference edges: any argument that is a bare identifier or member

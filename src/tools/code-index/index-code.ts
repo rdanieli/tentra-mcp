@@ -35,7 +35,14 @@ const EXTRACTORS = {
   rust:       new RustExtractor()
 } as const
 
-const IGNORED = new Set(['node_modules', '.git', 'dist', 'build', '.next', '__pycache__', 'target', 'vendor'])
+const IGNORED = new Set([
+  'node_modules', '.git', 'dist', 'build', '.next', '__pycache__', 'target', 'vendor',
+  // Agent-worktree scratch dirs created by tools like Claude Code Superpowers.
+  // Not user-authored code; bloats the graph and pollutes diffs.
+  '.claude', '.cursor-worktrees', '.worktrees', '.tmp', 'out',
+  // Coverage / test artefacts
+  'coverage', '.nyc_output', '.pytest_cache'
+])
 
 // Tag symbols defined in test / fixture / e2e files so queries can filter
 // them out by default. Heuristic matches both directory-based and filename-
@@ -136,11 +143,16 @@ export async function indexCodeHandler(raw: unknown): Promise<{ content: Array<{
     }
   }
   const qnToSymbolId = new Map<string, string>()
-  // Map short-name → candidate symbol IDs, used for cross-file resolution of
-  // edges whose callee is only known by its local identifier (e.g. "upsert",
-  // "createSnapshot"). Tree-sitter extraction can't resolve these at parse
-  // time without import analysis, so we do a post-hoc unique-match pass.
-  const shortNameToIds = new Map<string, string[]>()
+  // Map qualifiedName → fileId so we can prefer same-file resolution when
+  // cross-file short-name matches are ambiguous. Prevents bin-local helpers
+  // like `log` (defined and called within bin/tentra-mcp.js) from inflating
+  // the fanIn of an unrelated production `log` symbol elsewhere.
+  const qnToFileId = new Map<string, string>()
+  // Map short-name → candidate (symbolId, fileId) tuples. One short name can
+  // resolve to multiple symbols (method conflicts across classes / same name
+  // used locally in two files) — we keep all candidates and pick the best at
+  // edge-resolution time.
+  const shortNameToCandidates = new Map<string, Array<{ id: string; fileId: string }>>()
   if (symbolsToUpload.length > 0) {
     // De-duplicate by qualifiedName within snapshot — upsert key in the DB.
     const seen = new Set<string>()
@@ -151,6 +163,11 @@ export async function indexCodeHandler(raw: unknown): Promise<{ content: Array<{
       seen.add(s.qualifiedName)
       deduped.unshift(s)
     }
+    // Build qualifiedName → fileId map from the deduped payload so we can
+    // correlate server-returned IDs back to their source file.
+    const qnToFileIdPayload = new Map<string, string>()
+    for (const d of deduped) qnToFileIdPayload.set(d.qualifiedName, d.fileId)
+
     for (let i = 0; i < deduped.length; i += SYMBOL_CHUNK) {
       const chunk = deduped.slice(i, i + SYMBOL_CHUNK)
       const resp = await apiPost<{ count: number; symbols: Array<{ id: string; qualifiedName: string }> }>(
@@ -158,15 +175,15 @@ export async function indexCodeHandler(raw: unknown): Promise<{ content: Array<{
         { symbols: chunk }
       )
       for (const s of resp.symbols) {
+        const fileId = qnToFileIdPayload.get(s.qualifiedName) ?? ''
         qnToSymbolId.set(s.qualifiedName, s.id)
-        // Short name is the last segment after "." (e.g. "Cart.total" -> "total",
-        // or bare identifier like "foo" -> "foo"). One short name can resolve
-        // to multiple symbols (method conflicts across classes) — collect all.
+        qnToFileId.set(s.qualifiedName, fileId)
         const dot = s.qualifiedName.lastIndexOf('.')
         const shortName = dot >= 0 ? s.qualifiedName.slice(dot + 1) : s.qualifiedName
-        const bucket = shortNameToIds.get(shortName)
-        if (bucket) bucket.push(s.id)
-        else shortNameToIds.set(shortName, [s.id])
+        const bucket = shortNameToCandidates.get(shortName)
+        const entry = { id: s.id, fileId }
+        if (bucket) bucket.push(entry)
+        else shortNameToCandidates.set(shortName, [entry])
       }
     }
   }
@@ -180,8 +197,11 @@ export async function indexCodeHandler(raw: unknown): Promise<{ content: Array<{
     edgeType: string
   }>
   let resolvedViaShort = 0
+  let resolvedSameFile = 0
+  let methodCallsSkipped = 0
   let fileOwnerReferences = 0
   for (const fp of filePayloads) {
+    const fileId = pathToFileId.get(fp.relativePath) ?? ''
     for (const e of fp.extraction.edges) {
       // Resolve `from`: either a real symbol or the FILE_OWNER sentinel.
       // FILE_OWNER edges come from file-scope code (top-level `server.tool(...)`,
@@ -193,19 +213,39 @@ export async function indexCodeHandler(raw: unknown): Promise<{ content: Array<{
 
       // Resolution strategy for `to` (in order):
       //   1. e.toQualifiedName directly in qnToSymbolId — fully qualified match
-      //   2. e.toExternal matches exactly one symbol by short-name — unique cross-file match
-      //   3. Else keep as external (toSymbolId=null, toExternal preserved)
+      //   2. For bare `call` edges only: same-file short-name match, then
+      //      unique cross-file short-name match.
+      //   3. For `method_call` edges: ONLY the fully-qualified match above.
+      //      Method calls (`foo.bar()`) target a member of whatever `foo`
+      //      is at runtime — we cannot resolve that statically without type
+      //      inference, and short-name fallback would incorrectly glue every
+      //      `console.log` onto a random `log` symbol in the codebase.
+      //   4. Else keep as external (toSymbolId=null, toExternal preserved).
       let toId: string | null = null
       let toExternal = e.toExternal
       if (e.toQualifiedName) {
         toId = qnToSymbolId.get(e.toQualifiedName) ?? null
       }
-      if (!toId && e.toExternal) {
-        const candidates = shortNameToIds.get(e.toExternal)
-        if (candidates && candidates.length === 1) {
-          toId = candidates[0]
-          toExternal = null  // no longer external — we resolved it
-          resolvedViaShort += 1
+      if (!toId && e.toExternal && e.edgeType === 'method_call') {
+        // Method call with no qualified-name hit — don't guess. Count and skip.
+        methodCallsSkipped += 1
+      } else if (!toId && e.toExternal) {
+        const candidates = shortNameToCandidates.get(e.toExternal)
+        if (candidates && candidates.length > 0) {
+          // Prefer same-file match when the caller's file contains a candidate.
+          const sameFile = candidates.filter(c => c.fileId === fileId)
+          if (sameFile.length === 1) {
+            toId = sameFile[0].id
+            toExternal = null
+            resolvedSameFile += 1
+          } else if (candidates.length === 1) {
+            // Unique cross-file match (no same-file candidate at all).
+            toId = candidates[0].id
+            toExternal = null
+            resolvedViaShort += 1
+          }
+          // Otherwise: ambiguous (multiple candidates across files, no
+          // same-file tiebreak). Leave external.
         }
       }
       // Skip FILE_OWNER edges that resolved to nothing useful (no target).
@@ -227,8 +267,14 @@ export async function indexCodeHandler(raw: unknown): Promise<{ content: Array<{
   }
   // Emit resolution stats to stderr so the operator can see how effective
   // the unique-short-name heuristic was for this repo.
+  if (resolvedSameFile > 0) {
+    console.error(`[index_code] resolved ${resolvedSameFile} edges via same-file short-name match`)
+  }
   if (resolvedViaShort > 0) {
-    console.error(`[index_code] resolved ${resolvedViaShort} edges via short-name unique match`)
+    console.error(`[index_code] resolved ${resolvedViaShort} edges via cross-file short-name unique match`)
+  }
+  if (methodCallsSkipped > 0) {
+    console.error(`[index_code] skipped ${methodCallsSkipped} method_call edges (receiver type unknown — left external)`)
   }
   if (fileOwnerReferences > 0) {
     console.error(`[index_code] captured ${fileOwnerReferences} file-scope reference edges (callback patterns → fanIn)`)

@@ -9,12 +9,20 @@ Dogfood benchmark on our own monorepo: **99.4% token reduction** (156.8× ratio)
 ## Quick Start
 
 ```bash
-npx tentra-mcp
+cd your-repo
+npx tentra-mcp init
 ```
 
-On first use, your browser opens for one-click GitHub sign-in. That's it — no API key needed.
+One command. Detects the repo, writes MCP config for Cursor, Claude Code, Codex, and Windsurf, and prints the 3 next steps. Idempotent — re-run it safely.
 
-> **Advanced:** If you prefer to use an API key directly, run `npx tentra-mcp --key YOUR_API_KEY`. Get your key at [trytentra.com/settings](https://trytentra.com/settings).
+Then grab your API key at [trytentra.com/settings](https://trytentra.com/settings), replace `YOUR_TENTRA_API_KEY` in the generated config, reload your IDE, and ask your agent:
+
+```
+Index this codebase with Tentra and list the god-nodes
+```
+
+> **Manual stdio install:** `npx tentra-mcp` (opens browser for GitHub device-flow auth on first tool call).
+> **API key instead:** `npx tentra-mcp --key YOUR_API_KEY`.
 
 ## What is Tentra?
 

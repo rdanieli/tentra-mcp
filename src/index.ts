@@ -206,16 +206,17 @@ const server = new McpServer({
 
 server.tool(
   'create_architecture',
-  `Create a new system architecture artifact.
-Call this tool whenever the user asks to design, plan, or describe any system, feature, or integration.
-NEVER respond with plain text architecture descriptions — always call this tool instead.
-After calling, share the returned URL with the user.`,
+  `Create a new, versioned architecture diagram from a set of services, connections, and (optionally) external actors, and return a shareable web URL.
+
+Use instead of describing an architecture in chat: whenever the user asks to design, plan, sketch, or document any system/feature/integration, call this tool and share the returned URL. Use update_architecture instead if you already have an architecture ID in context (from list_architectures or an earlier create call) — this tool always creates a NEW artifact.
+
+Prerequisites: Tentra API auth (device-flow on first call, then a cached API key). Network access required. Side effects: writes a new Architecture row (v1) to Tentra, auto-makes it publicly shareable, and opens the web URL in the user's browser on first call per session. Response shape: { id, name, version, url } plus a text summary with counts. After creation, pass the returned id to update_architecture to evolve it, lint_architecture to validate it, or create_flow to add walkthroughs.`,
   {
-    name: z.string().describe('Short descriptive name, e.g. "Payment System" or "Fraud Detection Pipeline"'),
-    description: z.string().optional().describe('Brief context about the system'),
-    services: z.array(ServiceSchema).min(1).describe('All services/components in the architecture'),
-    connections: z.array(ConnectionSchema).describe('All connections between services'),
-    actors: z.array(ActorSchema).optional().describe('External actors that interact with the system (shown in context-level view)')
+    name: z.string().describe('Short, human-readable Title Case name, max ~60 chars. Examples: "Payment Processing System", "Fraud Detection Pipeline", "Checkout BFF". Used as the diagram title.'),
+    description: z.string().optional().describe('One-paragraph context: business problem, scope, or key constraints. Shown as subtitle on the canvas. Omit if the services list is self-explanatory.'),
+    services: z.array(ServiceSchema).min(1).describe('Every service / data store / queue / external dep in the system. Must include at least one. IDs must be snake_case and unique within the architecture (e.g. "payment_service", "fraud_api"). Every target of a connection must appear here.'),
+    connections: z.array(ConnectionSchema).describe('Directed edges between services, using service IDs from the services array. Use sync_http for REST/GraphQL, async_event for pub/sub, db_access for service→DB, grpc for internal gRPC. May be empty array if the system is truly standalone, but typically is not.'),
+    actors: z.array(ActorSchema).optional().describe('External humans / systems / timers that trigger the system (e.g. "mobile_user", "cron_scheduler"). Rendered in the C4 Level-1 context view. Omit for purely internal / backend-only diagrams.')
   },
   async ({ name, description, services, connections, actors }) => {
     const data = await apiRequest('POST', '/architectures', {
@@ -244,16 +245,17 @@ After calling, share the returned URL with the user.`,
 
 server.tool(
   'update_architecture',
-  `Update an existing architecture artifact.
-Call this when the user wants to modify, evolve, or improve an architecture that already exists.
-NEVER create a new one if you have an existing ID in context — always update instead.
-Preserves all existing services/connections unless explicitly replaced.`,
+  `Mutate an existing architecture — bump its version, snapshot the prior state as a version record, and replace whichever top-level fields you pass.
+
+Use instead of create_architecture whenever you already have an architecture id in context from a previous call, list_architectures, or the URL. Unlike create_architecture (which always makes a brand-new artifact), this preserves identity and lineage: version auto-increments and the old state is kept in the ArchitectureVersion history. Each field is replace-not-merge — if you pass services, you REPLACE the full services array; fields you omit are left untouched.
+
+Prerequisites: Tentra API auth + a valid architecture id owned by the caller. Side effects: writes a new ArchitectureVersion row, PATCHes the Architecture. Response: { id, name, version, url } — share the URL back to the user.`,
   {
-    id: z.string().describe('The architecture ID to update'),
-    name: z.string().optional(),
-    description: z.string().optional(),
-    services: z.array(ServiceSchema).optional(),
-    connections: z.array(ConnectionSchema).optional()
+    id: z.string().describe('Architecture ID to update, e.g. "cm2abc123" — the opaque ID returned by create_architecture or list_architectures. Required.'),
+    name: z.string().optional().describe('New Title Case name. Omit to leave unchanged.'),
+    description: z.string().optional().describe('New description paragraph. Omit to leave unchanged.'),
+    services: z.array(ServiceSchema).optional().describe('FULL replacement services array — include everything that should remain (not a patch). Omit to leave the services list untouched.'),
+    connections: z.array(ConnectionSchema).optional().describe('FULL replacement connections array — same replace-not-merge semantics as services. Omit to leave connections untouched.')
   },
   async ({ id, ...patch }) => {
     const data = await apiRequest('PATCH', `/architectures/${id}`, patch) as ArchResponse
@@ -272,9 +274,13 @@ Preserves all existing services/connections unless explicitly replaced.`,
 
 server.tool(
   'get_architecture',
-  'Retrieve a specific architecture by ID. Use this to read the current state before making updates.',
+  `Fetch ONE architecture by ID with the full services + connections + flows graph inline.
+
+Use instead of list_architectures when you already know the ID and need the contents (e.g. before calling update_architecture, or to re-explain an existing diagram). list_architectures returns IDs + names only for browsing; get_architecture returns the entire payload for a single diagram. If the user hasn't given you an ID, call list_architectures first.
+
+Prerequisites: Tentra API auth. Read-only, no side effects. Response: the full Architecture row as JSON (name, version, description, services[], connections[], actors?, flows?, createdAt, updatedAt).`,
   {
-    id: z.string().describe('The architecture ID to retrieve')
+    id: z.string().describe('Architecture ID to fetch, e.g. "cm2abc123". Obtain from create_architecture, list_architectures, or a /arch/<id> URL.')
   },
   async ({ id }) => {
     const data = await apiRequest('GET', `/architectures/${id}`)
@@ -293,7 +299,11 @@ server.tool(
 
 server.tool(
   'list_architectures',
-  'List all saved architectures. Use when the user asks to see, browse or find existing architectures.',
+  `List every saved architecture in this workspace as a lightweight summary (id + name + version + createdAt + URL), newest first.
+
+Use for BROWSING / DISCOVERY — "what have I designed already?", "find an architecture named X". Unlike get_architecture, this does NOT return services or connections; once the user picks one, call get_architecture with the returned id to load the full graph before editing.
+
+Prerequisites: Tentra API auth. Read-only. Response: Array of { id, name, version, createdAt } rendered as a human-readable bullet list with share URLs. Empty workspaces receive a hint to call create_architecture.`,
   {},
   async () => {
     const data = await apiRequest('GET', '/architectures') as ArchSummary[]
@@ -311,16 +321,15 @@ server.tool(
 
 server.tool(
   'analyze_codebase',
-  `Scan a local codebase directory and automatically generate an architecture diagram.
-Detects services from package.json, docker-compose, pom.xml, go.mod, and Python configs.
-Infers connections from dependencies, imports, env vars, and docker-compose depends_on.
-Detects databases, queues, external services, and API gateways automatically.
-After analysis, creates the architecture and returns the URL.
-Also runs lint rules and reports quality issues.`,
+  `Scan a local monorepo / project directory, auto-detect its services (from package.json, docker-compose, pom.xml, go.mod, Python configs), infer their connections (from deps, imports, env vars, docker depends_on), and materialize the result as a new Tentra architecture diagram in one shot.
+
+Use when the user says "analyze / reverse-engineer / document my codebase" or when starting from an existing repo rather than from scratch. Unlike create_architecture (manual services array) and unlike index_code (symbol-level code graph with no diagram), this produces a high-level service-level diagram from config files only — cheap and fast, but coarse. For symbol-level understanding afterwards, also run index_code.
+
+Prerequisites: Tentra API auth + local filesystem access (not available over the SSE transport — use the stdio server). Heavy local scan, then one POST. Side effects: creates a NEW Architecture (via create_architecture under the hood) and opens the browser. Response: the created architecture id + URL + detected services list + lint report. If no services are detected, returns a warning with no artifact created.`,
   {
-    path: z.string().describe('Absolute path to the codebase root directory to scan'),
-    name: z.string().optional().describe('Architecture name. If omitted, inferred from directory name.'),
-    description: z.string().optional().describe('Brief description of the system')
+    path: z.string().describe('Absolute path to the codebase root to scan, e.g. "/Users/alex/code/my-monorepo". Must contain at least one recognizable manifest (package.json, docker-compose.yml, pom.xml, go.mod, pyproject.toml, etc.).'),
+    name: z.string().optional().describe('Title Case name for the resulting architecture. Defaults to a Title-Cased version of the directory name (e.g. my-monorepo → "My Monorepo").'),
+    description: z.string().optional().describe('One-sentence description to attach to the diagram. Defaults to "Auto-generated from codebase analysis of <path>".')
   },
   async ({ path, name, description }) => {
     // Dynamic import to avoid loading analyzer at startup
@@ -392,11 +401,15 @@ Also runs lint rules and reports quality issues.`,
 
 server.tool(
   'lint_architecture',
-  `Validate an existing architecture for quality issues.
-Checks for: orphan nodes, duplicate connections, naming violations,
-single points of failure, god services, missing databases, sync overload, and more.`,
+  `Run 8 architecture-quality rules against a saved diagram and return a severity-tagged list of issues (errors / warnings / info).
+
+Rules covered: orphan_node, duplicate_connection, dangling_connection (references non-existent service), naming_convention (snake_case IDs), god_service (>6 connections), spof (single non-horizontal database with >1 dependent), missing_database, sync_overload (>5 sync HTTP edges on one service).
+
+Use BEFORE updating or exporting an architecture, or when the user asks "is this design OK?" / "what's wrong with X?". Unlike sync_architecture (which compares the diagram to real code), lint_architecture only inspects the diagram itself — no codebase needed, pure static checks. Run lint_architecture first to catch modeling errors; run sync_architecture afterwards to catch drift.
+
+Prerequisites: Tentra API auth + an existing architecture id. Read-only. Response: markdown report with counts (errors/warnings/info) and per-issue [rule] message lines, or a "passed all lint checks" message if clean.`,
   {
-    id: z.string().describe('The architecture ID to lint')
+    id: z.string().describe('Architecture ID to lint, e.g. "cm2abc123". Obtain from create_architecture or list_architectures.')
   },
   async ({ id }) => {
     const { lintArchitecture } = await import('./analyzer/lint.js')
@@ -433,12 +446,14 @@ single points of failure, god services, missing databases, sync overload, and mo
 
 server.tool(
   'sync_architecture',
-  `Compare a saved architecture against the current codebase to detect drift.
-Scans the codebase and diffs the detected services/connections against the saved diagram.
-Reports added, removed, and changed services/connections with an accuracy score.`,
+  `Diff a saved Tentra architecture against the current state of a local codebase and return a drift report: services added / removed / changed, connections added / removed, plus a 0–100 accuracy score.
+
+Use when the user asks "is my diagram still accurate?", "what's drifted?", or after significant refactors. Unlike lint_architecture (which only validates the diagram in isolation), this tool reads the codebase and compares. Unlike analyze_codebase (which creates a new diagram from scratch), this compares to an EXISTING diagram without overwriting it — use update_architecture afterwards if you want to apply the changes.
+
+Prerequisites: Tentra API auth + a saved architecture id + local filesystem access (not available over SSE — use stdio). Heavy local scan. Read-only with respect to the diagram. Response: markdown report with accuracy score, added/removed/changed services and connections, and a hint to call update_architecture to apply fixes.`,
   {
-    architectureId: z.string().describe('The architecture ID to compare against'),
-    codebasePath: z.string().describe('Absolute path to the codebase root directory to scan')
+    architectureId: z.string().describe('Saved architecture ID to compare against, e.g. "cm2abc123".'),
+    codebasePath: z.string().describe('Absolute path to the current codebase root to scan, e.g. "/Users/alex/code/my-monorepo". Must contain recognizable project manifests.')
   },
   async ({ architectureId, codebasePath }) => {
     const { scanCodebase } = await import('./analyzer/scanner.js')
@@ -525,20 +540,20 @@ Reports added, removed, and changed services/connections with an accuracy score.
 
 server.tool(
   'export_architecture',
-  `Export an architecture as runnable code, docker-compose, Mermaid diagram, or ADR docs.
-Available formats: mermaid, markdown-adr, docker-compose,
-java-spring-boot, nodejs-typescript, python-fastapi, go-chi,
-dotnet-aspnet, rust-axum, kotlin-ktor, php-laravel, ruby-rails, elixir-phoenix.
-For code exports, provide output_dir to save files directly into your project.`,
+  `Render a saved architecture as runnable code scaffolding, Mermaid, docker-compose, or an ADR markdown document and either stream it back as text or write it to disk.
+
+Use when the user asks to "scaffold / generate / export / materialize" a diagram. Text formats (mermaid, markdown-adr, docker-compose) are returned inline. Code formats generate a multi-file zip project scaffold (controllers, services, config, Dockerfile) and require output_dir. If you call a code format without output_dir, the tool returns a usage hint instead of creating anything.
+
+Prerequisites: Tentra API auth + existing architecture id. For code formats, local filesystem write access (not available over SSE — use stdio). Side effects: with output_dir, writes files/zip to disk under that directory. Response: inline text export, or a "Exported to <filePath>" confirmation when saved.`,
   {
-    id: z.string().describe('The architecture ID to export'),
+    id: z.string().describe('Architecture ID to export, e.g. "cm2abc123".'),
     format: z.enum([
       'mermaid', 'markdown-adr', 'docker-compose',
       'java-spring-boot', 'nodejs-typescript', 'python-fastapi', 'go-chi',
       'dotnet-aspnet', 'rust-axum', 'kotlin-ktor', 'php-laravel',
       'ruby-rails', 'elixir-phoenix'
-    ]).describe('Export format'),
-    output_dir: z.string().optional().describe('Directory to save exported files. Required for code formats.')
+    ]).describe('Export format. Text formats: "mermaid" (single .mmd), "markdown-adr" (ADR doc), "docker-compose" (single compose.yml). Code formats generate multi-file project scaffolds for the given stack — require output_dir.'),
+    output_dir: z.string().optional().describe('Absolute directory path to write the export into, e.g. "/Users/alex/code/exports/payments". Created if missing. REQUIRED for code formats (java-spring-boot, nodejs-typescript, python-fastapi, etc.). Optional for text formats — omit to receive the text inline.')
   },
   async ({ id, format, output_dir }) => {
     const textFormats = ['mermaid', 'markdown-adr', 'docker-compose']
@@ -619,12 +634,14 @@ const FlowSchema = z.object({
 
 server.tool(
   'create_flow',
-  `Create a step-by-step flow on an existing architecture. Flows visualize
-request paths, data pipelines, or business processes as sequential steps.
-Use when the user asks to describe, trace, or explain a flow through the system.`,
+  `Append an ordered step-by-step walkthrough (a "flow") to an existing architecture — e.g. a checkout request path, a data pipeline, or a failure-recovery procedure. The flow is rendered as an animated sequence on the canvas that highlights services and edges as the user steps through it.
+
+Use whenever the user asks to "trace / walk through / describe the steps of" something a system does. Unlike update_architecture, create_flow only appends to the flows array and bumps the version — it never touches services or connections. You can attach many flows to the same architecture (checkout flow, refund flow, signup flow, etc.).
+
+Prerequisites: Tentra API auth + an existing architecture with services already defined (the flow steps reference services by id). Side effects: appends the new flow to the Architecture.flows JSON column and bumps version. Response: confirmation + numbered step summary + view URL.`,
   {
-    architectureId: z.string().describe('The architecture ID to add the flow to'),
-    flow: FlowSchema
+    architectureId: z.string().describe('Architecture ID to attach the flow to, e.g. "cm2abc123". The flow references services by id, so those services must already exist on this architecture.'),
+    flow: FlowSchema.describe('The flow definition: unique id (e.g. "checkout_flow"), display name, optional description, and an ordered array of at least one step. Step types: "intro"/"conclusion" bookend, "message" is a service-to-service call (set from, to, connectionType), "process" is work inside one service (set serviceId), "info" is a plain note.')
   },
   async ({ architectureId, flow }) => {
     // 1. GET the architecture
@@ -658,7 +675,13 @@ Use when the user asks to describe, trace, or explain a flow through the system.
 
 server.tool(
   'index_code',
-  'Index a code repository (Tier 1 local, Tier 2 via agent)',
+  `Walk a local repo, extract symbols + call/import/reference edges via Tree-sitter (TypeScript, JavaScript, Python, Go, Java, Rust), and upload them to Tentra as a new immutable snapshot. This is what turns a raw checkout into a queryable code graph.
+
+WRITE PATH, LONG-RUNNING (seconds on small repos, a few minutes on 10k+ file monorepos). It iterates: walk files → parse with Tree-sitter locally → POST files → POST symbols → POST edges in batches → create a job row. For tier=tier2/both, also returns a first batch of files for the agent to enrich via record_semantic_node; call index_code_continue in a loop until done. For tier=tier1, returns immediately once static extraction finishes (no semantic enrichment).
+
+Use once per repo, then re-run after large refactors (or pass force_reindex=true). The read-path tools (query_symbols, find_references, get_symbol_neighbors, list_god_nodes, get_quality_hotspots, explain_code_path, get_service_code_graph, diff_snapshots) all require at least one successful index_code first and need the returned snapshot_id. Unlike analyze_codebase (which produces a high-level services diagram from manifests), index_code produces a symbol-level graph — run both for complete coverage.
+
+Prerequisites: Tentra API auth + local filesystem read access to repo_path (not available over SSE — use stdio). Ignores node_modules, .git, dist, build, vendor, coverage, .worktrees, etc. Response: { job_id, snapshot_id, file_count, tier } for tier1, plus { first_batch, remaining } for tier2.`,
   IndexCodeSchema.shape,
   async (args) => { await ensureAuth(); return indexCodeHandler(args) }
 )
@@ -667,7 +690,11 @@ server.tool(
 
 server.tool(
   'index_code_continue',
-  'Continue an in-progress indexing job',
+  `Drive the tier-2 indexing loop forward: check a job's progress and either mark it done (when every file has been processed) or return the remaining file count so the agent knows it should send another batch of record_semantic_node calls.
+
+Use ONLY after index_code with tier="tier2" or tier="both" returned a job_id. Typical loop: call index_code → for each file in first_batch, call record_semantic_node with the agent's inferred purpose → call index_code_continue → if done=true, stop; if pending>0, enrich more files and repeat. Unlike get_index_job (pure read), this tool will mark the job "completed" when processedFiles has caught up — it advances state. Unlike index_code (heavy local walk), this is a light status check.
+
+Prerequisites: Tentra API auth + a job_id from index_code. Side effect: may transition the job from in_progress → completed. Response: { done: true, summary: { processed, total } } when finished, or { pending, cursor, instruction } when more work is needed.`,
   IndexCodeContinueSchema.shape,
   async (args) => { await ensureAuth(); return indexCodeContinueHandler(args) }
 )
@@ -676,7 +703,11 @@ server.tool(
 
 server.tool(
   'record_semantic_node',
-  'Persist an agent-extracted semantic node for a file or symbol',
+  `Persist ONE agent-inferred semantic annotation (a one-sentence purpose + domain tags + confidence + optional semantic role) for a single file OR single symbol in an indexing job, and advance that job's progress cursor by 1.
+
+This is the write side of tier-2 indexing: after index_code (tier2/both) returns a batch of files with their symbol skeletons, the agent reads each file's source, decides what it does, and calls record_semantic_node per file — Tentra stores the annotation in CodeSemantic and marks the file as tier2-indexed. The job cursor auto-advances so index_code_continue eventually returns done=true. Unlike record_embedding (which stores vectors for find_similar_code), record_semantic_node stores human-readable purpose text plus domain tags and surfaces in query_symbols, explain_code_path, get_service_code_graph (include_semantics=true), and get_decisions_for.
+
+Prerequisites: Tentra API auth + an active job_id from index_code + a file_id OR symbol_id from that job's snapshot (exactly one of the two is required). Call per file/symbol, not in a single mega-batch. Response: { ok: true, semantic_id }.`,
   RecordSemanticNodeSchema.shape,
   async (args) => { await ensureAuth(); return recordSemanticNodeHandler(args) }
 )
@@ -685,7 +716,11 @@ server.tool(
 
 server.tool(
   'get_index_job',
-  'Get the status of an indexing job',
+  `Read-only status lookup for an indexing job: tier, status, snapshotId, totalFiles, processedFiles, lastBatchCursor, createdAt, completedAt.
+
+Use when you need to INSPECT a job without advancing it — e.g. to report progress to the user or to decide whether a previously-started job is still in flight. Unlike index_code_continue, this tool never mutates the job (no auto-completion, no cursor advance) and never returns batches — it just reflects current state. Unlike list_snapshots (which lists every snapshot in a repo), this returns the one job row.
+
+Prerequisites: Tentra API auth + a job_id from a prior index_code call. Read-only. Response: the full Job JSON, including status enum ("pending" | "in_progress" | "completed" | "failed").`,
   GetIndexJobSchema.shape,
   async (args) => { await ensureAuth(); return getIndexJobHandler(args) }
 )
@@ -694,7 +729,13 @@ server.tool(
 
 server.tool(
   'query_symbols',
-  'Search for symbols by name or qualified name. Default mode="trigram" for fuzzy lookups. Pass mode="substring" for broad listings like "Handler" or "Controller" (ranked by fan-in+fan-out). Replaces 10+ grep calls. Returns symbol kind, file path, fan-in/out, semantic role.',
+  `Search the indexed code graph for symbols (functions, classes, methods, interfaces, types, variables) by name or qualified name. Replaces 10+ grep calls per discovery task.
+
+Two match modes: "trigram" (default, pg_trgm similarity — best for fuzzy / typo-tolerant / unique-symbol lookups), "substring" (ILIKE %q% — best for broad listings like every "Handler" or "Controller" in the repo; results ranked by fanIn + fanOut so central ones float to the top).
+
+Use this as the STARTING POINT for any code-graph question, because it returns symbol IDs that every other read-path tool needs. Unlike find_references (which takes a known symbol_id and returns its callers), query_symbols searches by NAME and returns candidates. Unlike get_symbol_neighbors (which takes a symbol_id and walks the call graph), query_symbols does no traversal — it only matches names. Unlike find_similar_code (vector cosine over embeddings), query_symbols is literal/fuzzy text matching.
+
+Prerequisites: Tentra API auth + a snapshot_id from a completed index_code run. Read-only. Response: { symbols: [{ id, kind, name, qualifiedName, startLine, endLine, fanIn, fanOut, isGodNode, semanticRole, filePath }] }.`,
   QuerySymbolsSchema.shape,
   async (args) => { await ensureAuth(); return querySymbolsHandler(args) }
 )
@@ -703,7 +744,11 @@ server.tool(
 
 server.tool(
   'find_references',
-  'Find every location that references a symbol — the refactor-safety tool. Returns resolved call/import/reference edges (from graph) and optionally unresolved short-name matches. Use before a rename to see every caller, or before deletion to confirm nothing depends on it. Safer than grep for TypeScript/JavaScript because it follows the call graph, not just text.',
+  `Return every resolved caller / importer / inheritor of a single symbol from the code graph — the refactor-safety tool. Use before renaming or deleting a symbol to see exactly who depends on it.
+
+Unlike query_symbols (which takes a NAME and returns candidate symbols), find_references takes a KNOWN symbol_id and walks edges backward (toSymbolId = symbol_id) to find inbound references. Unlike get_symbol_neighbors (which does BFS to depth N in both directions), find_references only returns direct callers (depth 1, inbound) and is cheaper. Safer than grep because it uses the resolved call graph, not plain text — it will not confuse "log" the method with "log" the string. Set include_unresolved=true to also get short-name text matches that couldn't be resolved to a specific symbol (noisier; useful for broad audits but not for rename plans).
+
+Prerequisites: Tentra API auth + a symbol_id from query_symbols + the matching snapshot_id. Read-only. Response: { target, resolvedCount, unresolvedCount, fileScopeCount, references: [{ kind: 'resolved'|'unresolved', edgeType, fromQualifiedName, fromKind, filePath, startLine, endLine, callCount }] }.`,
   FindReferencesSchema.shape,
   async (args) => { await ensureAuth(); return findReferencesHandler(args) }
 )
@@ -712,7 +757,11 @@ server.tool(
 
 server.tool(
   'get_symbol_neighbors',
-  'BFS graph traversal from a symbol — who calls it, what it calls, imports, inheritance. Eliminates 20+ file reads per question.',
+  `Breadth-first traverse the code graph starting from one symbol to return its local neighborhood: what it calls, what calls it, what it imports, inheritance / implementation relationships. Eliminates 20+ file-reads per "how does this work?" question.
+
+Unlike find_references (which only returns direct callers = depth-1 inbound), get_symbol_neighbors walks OUTBOUND by default and can go deeper (up to depth=5) and bidirectional (direction="both"). Unlike explain_code_path (which finds the shortest single path between two given symbols), this tool explores the neighborhood around ONE symbol without a target. Filter by edge_types to focus on just imports, just calls, just inheritance, etc.
+
+Prerequisites: Tentra API auth + a symbol_id (from query_symbols) + snapshot_id. Read-only. Response: { symbolId, depth, neighbors: [{ id, kind, name, qualifiedName, filePath, fanIn, fanOut, isGodNode }], edges: [{ from, to, type }] }.`,
   GetSymbolNeighborsSchema.shape,
   async (args) => { await ensureAuth(); return getSymbolNeighborsHandler(args) }
 )
@@ -721,7 +770,11 @@ server.tool(
 
 server.tool(
   'get_service_code_graph',
-  'Returns the full code subgraph for a Tentra canvas service: files, symbols, and cross-service edges.',
+  `Return the full code subgraph that belongs to ONE Tentra canvas service: every file mapped to that service, all the symbols in those files, and the edges leaving those symbols (including cross-service edges).
+
+Use when the user has an architecture diagram and asks "what code is in the payment_service?", or when you want to reason about one service in isolation. Unlike get_symbol_neighbors (which starts from a single symbol), this starts from a service_id and pulls the whole service at once. Unlike query_symbols (which ignores service boundaries), this is already scoped. Requires a prior set_service_mapping call so files are actually assigned to the service_id — otherwise the result is empty.
+
+Prerequisites: Tentra API auth + a snapshot_id from a completed index_code + at least some files mapped to service_id via set_service_mapping. Read-only. Response: { serviceId, snapshotId, depth, files: [{ id, relativePath, language, loc, symbols: [...] }], edges: [{ fromSymbolId, toSymbolId, toExternal, edgeType }] }. Pass include_semantics=true to also attach record_semantic_node purpose + domainTags per symbol.`,
   GetServiceCodeGraphSchema.shape,
   async (args) => { await ensureAuth(); return getServiceCodeGraphHandler(args) }
 )
@@ -730,7 +783,11 @@ server.tool(
 
 server.tool(
   'explain_code_path',
-  'Finds the shortest call/import path between two symbols and annotates each hop with semantic purpose. Answers "how does X reach Y?"',
+  `Compute the SHORTEST call/import/reference chain between two given symbols in a snapshot, and annotate each intermediate hop with its record_semantic_node purpose (when available). Answers "how does X reach Y?" / "is A actually connected to B?".
+
+Unlike get_symbol_neighbors (which explores around ONE symbol with no target), this tool needs BOTH endpoints and performs a targeted shortest-path search. Unlike find_references (direct callers only), explain_code_path can cross arbitrarily many hops. If no path exists between the two symbols in the graph, the response is { error: "no_path" }.
+
+Prerequisites: Tentra API auth + two symbol_ids from query_symbols + the snapshot_id they both live in. Read-only. Response when a path exists: { found: true, hopCount, path: [{ id, name, qualifiedName, filePath, purpose }], edges: [{ from, to, type }] }.`,
   ExplainCodePathSchema.shape,
   async (args) => { await ensureAuth(); return explainCodePathHandler(args) }
 )
@@ -739,7 +796,11 @@ server.tool(
 
 server.tool(
   'find_similar_code',
-  'Vector similarity search using pgvector cosine distance. Pass a query_vector (embed your text with your native embedding capability first). Returns semantically similar symbols or files.',
+  `Run a pgvector cosine-similarity search over agent-generated embeddings stored via record_embedding. Pass a pre-computed query_vector (you must embed your text first with your own embedding capability — this tool does NOT embed for you) and optionally restrict by entity_type or snapshot_id. Returns the most semantically similar files or symbols.
+
+Unlike query_symbols (exact/fuzzy NAME match on qualifiedName), find_similar_code matches MEANING — "rate limiting logic" will return files implementing throttles even if the word "rate-limit" never appears. Only useful after you've seeded embeddings for the target corpus via record_embedding; if no embeddings exist, results will be empty.
+
+Prerequisites: Tentra API auth + at least one record_embedding call against the snapshot you're querying + a caller-generated query_vector of matching dimension. Read-only. Response: { results: [{ entityType, entityId, snapshotId, model, similarity, sourceText }] } sorted by cosine similarity desc.`,
   FindSimilarCodeSchema.shape,
   async (args) => { await ensureAuth(); return findSimilarCodeHandler(args) }
 )
@@ -748,7 +809,11 @@ server.tool(
 
 server.tool(
   'record_embedding',
-  'Store an embedding vector for a symbol or file. Call this after generating an embedding with your native capability. Used to populate the vector search index.',
+  `Persist ONE pre-computed embedding vector for a file or symbol so it becomes searchable via find_similar_code. You must produce the vector yourself (the agent embeds the source_text with whatever model it has access to) — Tentra stores vector + source_text + model identifier but does not call any embedding API on your behalf.
+
+Use in a loop after index_code to seed the vector index: for each file or symbol you care about, embed a representative snippet (function signature + doc comment, or file summary) and record it. Unlike record_semantic_node (human-readable purpose stored in CodeSemantic), record_embedding stores a dense vector in pgvector for cosine search. The two are complementary, not alternatives.
+
+Prerequisites: Tentra API auth + a file_id or symbol_id from a completed index_code + a vector you already computed. Write path. Side effect: inserts into the embeddings table. Response: { id, ok: true }.`,
   RecordEmbeddingSchema.shape,
   async (args) => { await ensureAuth(); return recordEmbeddingHandler(args) }
 )
@@ -757,7 +822,11 @@ server.tool(
 
 server.tool(
   'list_god_nodes',
-  'List symbols flagged as god nodes (very high fan-in or fan-out). Use to identify architectural coupling hotspots.',
+  `Return the top-N most coupled symbols in a snapshot — those with the highest fanIn + fanOut — as a ranked list. Surfaces architectural smells: utility modules that "know too much", classes every other class depends on, etc.
+
+Unlike get_quality_hotspots (which ranks FILES by churn × complexity × (1 − coverage) — a code-quality lens), list_god_nodes ranks SYMBOLS by raw graph degree — a coupling lens. Use list_god_nodes to find what to DECOMPOSE; use get_quality_hotspots to find what to REFACTOR. Provide either snapshot_id (specific) or repo_id (automatically uses latest snapshot). Test/fixture symbols are excluded by default because helpers like "request", "makeApp" would otherwise dominate the ranking.
+
+Prerequisites: Tentra API auth + at least one completed index_code run. Read-only. Response: { snapshotId, excludeTests, godNodes: [{ id, name, qualifiedName, filePath, isTest, fanIn, fanOut }] }.`,
   ListGodNodesSchema.shape,
   async (args) => { await ensureAuth(); return listGodNodesHandler(args) }
 )
@@ -766,7 +835,11 @@ server.tool(
 
 server.tool(
   'get_quality_hotspots',
-  'Rank files by a composite score of cyclomatic complexity × churn × (1 - test coverage). Top refactor candidates.',
+  `Rank FILES by a composite refactor-priority score: cyclomaticComplexity × (1 + churn30d/100) × (1 − testCoverage/100). High score = complex, frequently changed, poorly tested — the files most likely to break. The canonical "what should I refactor next?" list.
+
+Unlike list_god_nodes (which ranks SYMBOLS by graph-coupling degree), this ranks FILES by change-risk math. They answer different questions: list_god_nodes = "what is too connected?", get_quality_hotspots = "what's likely to break on the next change?". Run both for a complete architectural review. Response includes a dataSource field — "metrics" means real QualityMetric rows were available; "proxy" means Tentra fell back to LOC + symbols + fanIn heuristic because no QualityMetric data was seeded for this snapshot.
+
+Prerequisites: Tentra API auth + at least one completed index_code run. For real churn/coverage scores, QualityMetric rows must have been seeded (via separate ingestion — e.g. CI integration). Read-only. Response: { snapshotId, hotspots: [{ fileId, filePath, language, cyclomaticComplexity, cognitiveComplexity, churn30d, testCoverage, score }] }.`,
   GetQualityHotspotsSchema.shape,
   async (args) => { await ensureAuth(); return getQualityHotspotsHandler(args) }
 )
@@ -775,7 +848,11 @@ server.tool(
 
 server.tool(
   'list_snapshots',
-  'List all indexed snapshots for a repo, newest first. Use for time-travel — pick two snapshot IDs and call diff_snapshots.',
+  `List every code-graph snapshot stored for a given repo, newest first — each row has id, commitSha (when index_code ran inside a git working tree), createdAt, parentSnapshotId, and a stats blob.
+
+Use to TIME-TRAVEL through the repo's history: pick a snapshot_id from this list and feed it to any read-path tool (query_symbols, list_god_nodes, get_quality_hotspots, etc.) to inspect the graph as it looked at that point. To compare two points in time, pick two ids and call diff_snapshots. Unlike get_index_job (one job → one snapshot), this lists every snapshot regardless of how it was produced.
+
+Prerequisites: Tentra API auth + at least one completed index_code run for the repo_id. Read-only. Response: { repoId, snapshots: [{ id, commitSha, createdAt, stats, parentSnapshotId }] }.`,
   ListSnapshotsSchema.shape,
   async (args) => { await ensureAuth(); return listSnapshotsHandler(args) }
 )
@@ -784,7 +861,11 @@ server.tool(
 
 server.tool(
   'diff_snapshots',
-  'Compare two snapshots: files added/removed/modified, new/disappeared symbols, god-node deltas. Architectural diff between two commits.',
+  `Compute a structural diff between two snapshots of the same repo: files added / removed / modified (by contentHash), symbols (qualifiedNames) added / removed, and god-node changes (appeared / resolved). Effectively a commit-range architectural diff that answers "what actually changed between these two points?".
+
+Use to review a refactor PR at the graph level, to prove a deletion removed every caller, or to spot architectural regressions. Get the two snapshot ids from list_snapshots. Unlike sync_architecture (which diffs a DIAGRAM against live code), diff_snapshots diffs two code-graph snapshots against each other. Unlike get_quality_hotspots / list_god_nodes (which inspect one snapshot), this is the only tool that spans two.
+
+Prerequisites: Tentra API auth + two snapshot ids from list_snapshots (ideally of the same repo). Read-only. Response: { fromSnapshotId, toSnapshotId, files: { added, removed, modified }, symbols: { added, removed }, godNodes: { appeared, resolved } }.`,
   DiffSnapshotsSchema.shape,
   async (args) => { await ensureAuth(); return diffSnapshotsHandler(args) }
 )
@@ -793,7 +874,11 @@ server.tool(
 
 server.tool(
   'set_service_mapping',
-  'Assign one or more files in a snapshot to a Tentra canvas service ID. Use after indexing to declare which service owns each file.',
+  `Declare which Tentra canvas service owns which files in a specific snapshot — in one batched call. Each mapping is (relative file path → service id); every matching CodeFile row has its serviceId column updated.
+
+This is the bridge between the code graph (files, symbols, edges) and the architecture diagram (services, connections). get_service_code_graph and service-scoped views will return empty arrays until at least one set_service_mapping call has populated the mappings for a snapshot. Unlike set_domain_membership (which tags entities with abstract business domains), set_service_mapping tags files with a CONCRETE service on the canvas.
+
+Prerequisites: Tentra API auth + a snapshot_id from a completed index_code + service_ids that already exist on a Tentra architecture. Write path. Side effect: updates CodeFile.serviceId for each matching path. Paths that do not match any file in the snapshot are silently skipped. Response: { ok: true, updatedFiles: number }.`,
   SetServiceMappingSchema.shape,
   async (args) => { await ensureAuth(); return setServiceMappingHandler(args) }
 )
@@ -802,7 +887,11 @@ server.tool(
 
 server.tool(
   'set_domain_membership',
-  'Assign a file, symbol, or service to a domain. Supports AI-inferred or human-confirmed assignments with a confidence score.',
+  `Tag one file, symbol, or service as belonging to a business domain (e.g. "payments", "identity", "fraud"). Supports both AI-inferred (source="ai", lower confidence) and human-confirmed (source="human", confidence 1.0) assignments. Upserts: if the same (domain_id, entity_type, entity_id) tuple already has a membership, it is updated in place rather than duplicated.
+
+Use AI-inferred memberships to bootstrap domain maps after indexing, then let a human confirm and flip source to "human". Unlike set_service_mapping (which ties a FILE to a concrete canvas SERVICE, 1:1), domain memberships are many-to-many and scoped to abstract BUSINESS domains — one file can belong to multiple domains at different confidence levels.
+
+Prerequisites: Tentra API auth + a pre-existing domain_id (Domain rows are created separately via the web app or API) + a valid entity_id of the matching entity_type. Write path. Response: { ok: true, membership_id }.`,
   SetDomainMembershipSchema.shape,
   async (args) => { await ensureAuth(); return setDomainMembershipHandler(args) }
 )
@@ -811,7 +900,11 @@ server.tool(
 
 server.tool(
   'record_contract',
-  'Persist a service contract (OpenAPI, proto, event schema, etc.) to the code graph. Returns a contract_id to use with bind_contract.',
+  `Persist a service contract — an OpenAPI spec, proto file, GraphQL schema, event schema, Kafka/RabbitMQ topic schema, etc. — as a first-class entity in the code graph, so you can then attach code symbols to it via bind_contract and query it via get_contracts.
+
+Use once per contract per version. The contract itself is just metadata + an optional schema JSON payload (record_contract does NOT parse the schema — that's an upstream job). Unlike record_decision (which stores architectural rationale), this stores a TECHNICAL INTERFACE specification. After recording, call bind_contract to link the symbols that provide/consume/document it.
+
+Prerequisites: Tentra API auth + an existing workspace_id. Write path. Side effect: inserts a Contract row scoped to the workspace. Response: { ok: true, contract_id, name, kind }.`,
   RecordContractSchema.shape,
   async (args) => { await ensureAuth(); return recordContractHandler(args) }
 )
@@ -820,7 +913,11 @@ server.tool(
 
 server.tool(
   'bind_contract',
-  'Link a symbol to a contract as "provides", "consumes", or "documents". Use after record_contract to attach implementation evidence.',
+  `Link a code symbol to a contract with a typed relation: "provides" (symbol implements the contract, e.g. a handler that serves the OpenAPI endpoint), "consumes" (symbol calls the contract, e.g. a client that hits the endpoint), or "documents" (symbol describes the contract, e.g. a type definition generated from the schema).
+
+Use after record_contract — the contract_id it returned plus a symbol_id from query_symbols is what you need. Bindings are scoped to a snapshot_id, so the same symbol can be bound in many snapshots as the codebase evolves. Unique per (contract, symbol, snapshot): existing bindings with a new relation are updated in place rather than duplicated. Unlike link_decision (which links an ADR to architectural entities), bind_contract links a CONCRETE code symbol to a TECHNICAL INTERFACE.
+
+Prerequisites: Tentra API auth + existing contract_id (from record_contract) + valid symbol_id + snapshot_id the symbol belongs to. Write path. Response: { ok: true, binding_id, relation }.`,
   BindContractSchema.shape,
   async (args) => { await ensureAuth(); return bindContractHandler(args) }
 )
@@ -829,7 +926,11 @@ server.tool(
 
 server.tool(
   'get_contracts',
-  'List all contracts in a workspace, optionally filtered by kind (http, grpc, event, graphql, rabbit, kafka).',
+  `List every Contract stored in a workspace, newest first, with each row including a count of its bindings. Optionally filter by kind (http / grpc / event / graphql / rabbit / kafka).
+
+Use for BROWSING the workspace's contract inventory — "what API contracts do we have?", "show every Kafka topic schema". Per-contract detail (which symbols are bound to it, the full schema payload) is not returned here; fetch contract + bindings by id via the API if needed. Unlike record_contract (write), this is strictly read-only.
+
+Prerequisites: Tentra API auth + existing workspace_id. Read-only. Response: { contracts: [{ id, name, kind, version, specUrl, createdAt, _count: { bindings } }], total }.`,
   GetContractsSchema.shape,
   async (args) => { await ensureAuth(); return getContractsHandler(args) }
 )
@@ -838,7 +939,11 @@ server.tool(
 
 server.tool(
   'record_decision',
-  'Persist an Architecture Decision Record (ADR) to the code graph. Supports supersession, lifecycle status, and immediate entity links.',
+  `Persist an Architecture Decision Record (ADR) — slug + title + status + context + decision + consequences — as a first-class row in the code graph, with support for supersession (auto-marking an older decision "superseded") and immediate entity links (services, files, symbols, contracts, domains).
+
+Use when the user documents a real architectural call: "we chose Postgres over Mongo", "we split the monolith into N services", "we deprecated the legacy auth flow". Unlike link_decision (which attaches an existing decision to an entity after the fact), record_decision CREATES the decision and optionally attaches the initial set of entities in one call. Decisions surface later via get_decisions_for to explain "why is this like this?" while reviewing code.
+
+Prerequisites: Tentra API auth + existing workspace_id + unique slug within that workspace. Write path. Side effects: creates a Decision row, creates any DecisionLink rows from the links array, and updates the superseded_by_id target's status to "superseded" if provided. Response: { ok: true, decision_id, slug, status, links_created }.`,
   RecordDecisionSchema.shape,
   async (args) => { await ensureAuth(); return recordDecisionHandler(args) }
 )
@@ -847,7 +952,11 @@ server.tool(
 
 server.tool(
   'link_decision',
-  'Link an existing decision to a service, file, symbol, contract, or domain with a typed relationship (motivates, constrains, documents, implements).',
+  `Attach an EXISTING decision (from record_decision) to one more entity — a service, file, symbol, contract, or domain — with a typed relationship: "motivates" (decision caused this entity to exist), "constrains" (decision limits how it can evolve), "documents" (decision explains it), "implements" (entity is the concrete realization of the decision).
+
+Use for post-hoc linking: e.g. a month after recording an ADR you realize it also motivates a new service. Unlike record_decision (which can include initial links via the links[] array in one call), link_decision adds ONE link at a time to an already-persisted decision. Unlike get_decisions_for (read), this is a write.
+
+Prerequisites: Tentra API auth + existing decision_id + valid entity_id of the chosen entity_type. Write path. Response: { ok: true, link_id }.`,
   LinkDecisionSchema.shape,
   async (args) => { await ensureAuth(); return linkDecisionHandler(args) }
 )
@@ -856,7 +965,11 @@ server.tool(
 
 server.tool(
   'get_decisions_for',
-  'Retrieve all decisions that affect a specific entity (service, file, symbol, contract, or domain). Use to surface architectural rationale while reviewing code.',
+  `Look up every ADR that is linked to a specific entity — useful for answering "why is this service / file / symbol the way it is?" while reviewing code. Returns every linked decision with its full context + decision + consequences + link kind.
+
+Use proactively in code review: before changing a service, fetch its decisions to avoid violating constraints ("constrains" links) or re-litigating settled trade-offs. Include superseded decisions by default to preserve history; pass include_superseded=false to see only the currently-authoritative ADRs. Unlike link_decision (write), this is read-only. Unlike get_contracts (workspace-scope), this is entity-scope.
+
+Prerequisites: Tentra API auth + a valid entity_id matching the chosen entity_type. Read-only. Response: { decisions: [{ id, slug, title, status, context, decision, consequences, createdAt, decidedAt, linkKind }], total }.`,
   GetDecisionsForSchema.shape,
   async (args) => { await ensureAuth(); return getDecisionsForHandler(args) }
 )
@@ -865,7 +978,11 @@ server.tool(
 
 server.tool(
   'get_ownership',
-  'Resolve the owner(s) of a file path according to the workspace CODEOWNERS rules. Returns a list of team or user handles.',
+  `Resolve the owning team(s) for a given file path according to the workspace's CODEOWNERS-style rules (longest-match-wins with explicit priority). Returns a list of team or user handles.
+
+Use to answer "who owns this file?" / "who should review this change?" / "who should I ping about this bug?". OwnershipRule rows are stored per workspace — seed them by importing a CODEOWNERS file via the web app or API before calling this. Unlike get_decisions_for (which surfaces architectural rationale), this surfaces PEOPLE / TEAMS. If no rule matches, owners is [].
+
+Prerequisites: Tentra API auth + existing workspace_id + seeded OwnershipRule rows for that workspace. Read-only. Response: { path, owners: string[] }.`,
   GetOwnershipSchema.shape,
   async (args) => { await ensureAuth(); return getOwnershipHandler(args) }
 )

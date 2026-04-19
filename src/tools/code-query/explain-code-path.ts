@@ -2,9 +2,9 @@ import { z } from 'zod'
 import { apiGet } from '../code-index/api-client.js'
 
 export const ExplainCodePathSchema = z.object({
-  from_symbol: z.string().min(1).describe('Starting symbol ID'),
-  to_symbol: z.string().min(1).describe('Target symbol ID'),
-  snapshot_id: z.string().min(1).describe('Snapshot to query')
+  from_symbol: z.string().min(1).describe('Source symbol_id (one end of the path). Obtain from query_symbols. The path is computed as the shortest edge sequence starting at this symbol.'),
+  to_symbol: z.string().min(1).describe('Target symbol_id (the other end of the path). Obtain from query_symbols. Both symbols must belong to the same snapshot_id to be connectable.'),
+  snapshot_id: z.string().min(1).describe('Snapshot the two symbols live in. Obtain from index_code response or list_snapshots. If the symbols are in different snapshots, the search will return no_path.')
 })
 
 export async function explainCodePathHandler(raw: unknown) {

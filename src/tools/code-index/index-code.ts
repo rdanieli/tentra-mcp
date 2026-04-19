@@ -18,12 +18,12 @@ import {
 import { apiPost } from './api-client.js'
 
 export const IndexCodeSchema = z.object({
-  repo_path: z.string().min(1),
-  repo_id: z.string().min(1),
-  service_id: z.string().optional(),
-  force_reindex: z.boolean().optional(),
-  tier: z.enum(['tier1', 'tier2', 'both']).optional(),
-  batch_size: z.number().int().positive().max(50).optional()
+  repo_path: z.string().min(1).describe('Absolute or relative path to the repository root on the local filesystem, e.g. "/Users/alex/code/acme-monorepo" or ".". Tentra will walk this directory recursively, skipping node_modules/.git/dist/build/vendor/etc. Required — the tool reads source files from here with Tree-sitter.'),
+  repo_id: z.string().min(1).describe('Stable identifier for the repo across sessions — reuse the same value each time you index this codebase so snapshots accumulate under one repo. Conventionally "repo_<org>_<name>" or the git remote slug (e.g. "acme/api"). Required.'),
+  service_id: z.string().optional().describe('Optional Tentra canvas service_id to pre-assign every indexed file to (shorthand for calling set_service_mapping on every path afterwards). Use only if the entire repo maps 1:1 to one service on your architecture diagram. Omit for polyrepos or monorepos with multiple services.'),
+  force_reindex: z.boolean().optional().describe('If true, creates a fresh snapshot even when prior snapshots exist. Defaults to false (tool still creates a new snapshot row but this flag is reserved for future no-op dedup). Pass true after large refactors to avoid incremental-extraction edge cases.'),
+  tier: z.enum(['tier1', 'tier2', 'both']).optional().describe('tier1 = Tree-sitter static extraction only, returns immediately when files+symbols+edges are uploaded. tier2 = also run the agent-in-the-loop semantic enrichment (record_semantic_node per file). "both" (default) = tier1 + return the first tier2 batch so the agent can start enriching. Choose tier1 for fast indexing with no semantic purpose text.'),
+  batch_size: z.number().int().positive().max(50).optional().describe('Number of files per tier-2 agent batch. Default 20. Smaller batches = more index_code_continue round-trips but less memory per step; larger batches = fewer round-trips. Capped at 50.')
 })
 
 const EXTRACTORS = {

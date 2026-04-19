@@ -2,7 +2,7 @@ import { z } from 'zod'
 import { apiGet, apiPost } from './api-client.js'
 
 export const IndexCodeContinueSchema = z.object({
-  job_id: z.string().min(1)
+  job_id: z.string().min(1).describe('Job ID returned by a prior index_code call (tier="tier2" or "both"). Required — this tool drives the tier-2 loop for that specific job. Obtain from the JSON response of index_code. Example: "cm2abc123".')
 })
 
 export async function indexCodeContinueHandler(raw: unknown): Promise<{ content: Array<{ type: 'text'; text: string }> }> {

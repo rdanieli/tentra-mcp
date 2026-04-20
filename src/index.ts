@@ -130,7 +130,50 @@ async function ensureAuth(): Promise<string> {
   return authInProgress
 }
 
+// Endpoints that the local backend exposes via packages/mcp-server/src/local/handlers.ts.
+// Architecture endpoints (/architectures/**) are deliberately NOT included —
+// they're cloud-only and surfaced as a structured "requires hosted" error so
+// the agent gets a clear message instead of a cryptic network failure.
+function localBackendSupports(path: string): boolean {
+  return path.startsWith('/code-graph/')
+}
+
+// Short-circuit used by tier-2 tool handlers (architecture + export) to return
+// a structured `content[0].text` JSON payload in local mode instead of throwing
+// through apiRequest. The payload matches the dispatcher's cloudRequiredResponse
+// shape so every cloud-only tool emits the same JSON for the agent to parse.
+//
+// Caller pattern:
+//   const guard = localModeCloudRequired('this feature')
+//   if (guard) return guard
+//   // ... normal hosted path
+function localModeCloudRequired(scope: string) {
+  if (process.env.TENTRA_BACKEND !== 'local') return null
+  const payload = {
+    error: 'Requires hosted mode. See trytentra.com/docs/local.',
+    scope
+  }
+  return {
+    content: [{
+      type: 'text' as const,
+      text: JSON.stringify(payload)
+    }]
+  }
+}
+
 async function apiRequest(method: string, path: string, body?: unknown): Promise<unknown> {
+  // Local-mode branch: dispatch architecture calls to a structured error,
+  // code-graph calls to the local SQLite handlers. No auth needed.
+  if (process.env.TENTRA_BACKEND === 'local') {
+    if (!localBackendSupports(path)) {
+      throw new Error(
+        `Requires hosted mode: ${method} ${path} (architecture tools are not available in local mode). See trytentra.com/docs/local.`
+      )
+    }
+    const { localDispatch } = await import('./local/handlers.js')
+    return localDispatch(method, path, body)
+  }
+
   let apiKey: string
   try {
     apiKey = await ensureAuth()
@@ -226,6 +269,8 @@ Prerequisites: Tentra API auth (device-flow on first call, then a cached API key
     actors: z.array(ActorSchema).optional().describe('External humans / systems / timers that trigger the system (e.g. "mobile_user", "cron_scheduler"). Rendered in the C4 Level-1 context view. Omit for purely internal / backend-only diagrams.')
   },
   async ({ name, description, services, connections, actors }) => {
+    const guard = localModeCloudRequired('create_architecture')
+    if (guard) return guard
     const data = await apiRequest('POST', '/architectures', {
       name,
       description,
@@ -265,6 +310,8 @@ Prerequisites: Tentra API auth + a valid architecture id owned by the caller. Si
     connections: z.array(ConnectionSchema).optional().describe('FULL replacement connections array — same replace-not-merge semantics as services. Omit to leave connections untouched.')
   },
   async ({ id, ...patch }) => {
+    const guard = localModeCloudRequired('update_architecture')
+    if (guard) return guard
     const data = await apiRequest('PATCH', `/architectures/${id}`, patch) as ArchResponse
     return {
       content: [
@@ -290,6 +337,8 @@ Prerequisites: Tentra API auth. Read-only, no side effects. Response: the full A
     id: z.string().describe('Architecture ID to fetch, e.g. "cm2abc123". Obtain from create_architecture, list_architectures, or a /arch/<id> URL.')
   },
   async ({ id }) => {
+    const guard = localModeCloudRequired('get_architecture')
+    if (guard) return guard
     const data = await apiRequest('GET', `/architectures/${id}`)
     return {
       content: [
@@ -313,6 +362,8 @@ Use for BROWSING / DISCOVERY — "what have I designed already?", "find an archi
 Prerequisites: Tentra API auth. Read-only. Response: Array of { id, name, version, createdAt } rendered as a human-readable bullet list with share URLs. Empty workspaces receive a hint to call create_architecture.`,
   {},
   async () => {
+    const guard = localModeCloudRequired('list_architectures')
+    if (guard) return guard
     const data = await apiRequest('GET', '/architectures') as ArchSummary[]
     if (!data || data.length === 0) {
       return { content: [{ type: 'text' as const, text: 'No architectures found. Create one with create_architecture.' }] }
@@ -339,6 +390,8 @@ Prerequisites: Tentra API auth + local filesystem access (not available over the
     description: z.string().optional().describe('One-sentence description to attach to the diagram. Defaults to "Auto-generated from codebase analysis of <path>".')
   },
   async ({ path, name, description }) => {
+    const guard = localModeCloudRequired('analyze_codebase')
+    if (guard) return guard
     // Dynamic import to avoid loading analyzer at startup
     const { scanCodebase } = await import('./analyzer/scanner.js')
     const { lintArchitecture } = await import('./analyzer/lint.js')
@@ -419,6 +472,8 @@ Prerequisites: Tentra API auth + an existing architecture id. Read-only. Respons
     id: z.string().describe('Architecture ID to lint, e.g. "cm2abc123". Obtain from create_architecture or list_architectures.')
   },
   async ({ id }) => {
+    const guard = localModeCloudRequired('lint_architecture')
+    if (guard) return guard
     const { lintArchitecture } = await import('./analyzer/lint.js')
     const data = await apiRequest('GET', `/architectures/${id}`) as {
       name: string
@@ -463,6 +518,8 @@ Prerequisites: Tentra API auth + a saved architecture id + local filesystem acce
     codebasePath: z.string().describe('Absolute path to the current codebase root to scan, e.g. "/Users/alex/code/my-monorepo". Must contain recognizable project manifests.')
   },
   async ({ architectureId, codebasePath }) => {
+    const guard = localModeCloudRequired('sync_architecture')
+    if (guard) return guard
     const { scanCodebase } = await import('./analyzer/scanner.js')
     const { computeDiff } = await import('./analyzer/sync.js')
 
@@ -563,6 +620,8 @@ Prerequisites: Tentra API auth + existing architecture id. For code formats, loc
     output_dir: z.string().optional().describe('Absolute directory path to write the export into, e.g. "/Users/alex/code/exports/payments". Created if missing. REQUIRED for code formats (java-spring-boot, nodejs-typescript, python-fastapi, etc.). Optional for text formats — omit to receive the text inline.')
   },
   async ({ id, format, output_dir }) => {
+    const guard = localModeCloudRequired('export_architecture')
+    if (guard) return guard
     const textFormats = ['mermaid', 'markdown-adr', 'docker-compose']
     const isTextFormat = textFormats.includes(format)
 
@@ -651,6 +710,8 @@ Prerequisites: Tentra API auth + an existing architecture with services already 
     flow: FlowSchema.describe('The flow definition: unique id (e.g. "checkout_flow"), display name, optional description, and an ordered array of at least one step. Step types: "intro"/"conclusion" bookend, "message" is a service-to-service call (set from, to, connectionType), "process" is work inside one service (set serviceId), "info" is a plain note.')
   },
   async ({ architectureId, flow }) => {
+    const guard = localModeCloudRequired('create_flow')
+    if (guard) return guard
     // 1. GET the architecture
     const arch = await apiRequest('GET', `/architectures/${architectureId}`) as {
       name: string

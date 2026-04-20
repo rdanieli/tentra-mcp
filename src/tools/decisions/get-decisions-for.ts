@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { apiGet } from '../code-index/api-client.js'
+import { apiGet, localCloudRequiredContent } from '../code-index/api-client.js'
 
 export const GetDecisionsForSchema = z.object({
   entity_type: z.enum(['service', 'file', 'symbol', 'contract', 'domain'])
@@ -12,6 +12,8 @@ export const GetDecisionsForSchema = z.object({
 
 export async function getDecisionsForHandler(raw: unknown) {
   const args = GetDecisionsForSchema.parse(raw)
+  const guard = localCloudRequiredContent('decisions')
+  if (guard) return guard
 
   const data = await apiGet<{
     decisions: Array<{

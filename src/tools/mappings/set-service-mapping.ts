@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { apiPost } from '../code-index/api-client.js'
+import { apiPost, localCloudRequiredContent } from '../code-index/api-client.js'
 
 export const SetServiceMappingSchema = z.object({
   snapshot_id: z.string().min(1).describe('Snapshot ID to update file mappings in'),
@@ -11,6 +11,8 @@ export const SetServiceMappingSchema = z.object({
 
 export async function setServiceMappingHandler(raw: unknown) {
   const args = SetServiceMappingSchema.parse(raw)
+  const guard = localCloudRequiredContent('service-mapping')
+  if (guard) return guard
 
   const result = await apiPost<{ ok: boolean; updatedFiles: number }>(
     `/code-graph/snapshots/${args.snapshot_id}/files/map-service`,

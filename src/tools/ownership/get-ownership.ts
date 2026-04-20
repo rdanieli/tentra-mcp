@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { apiGet } from '../code-index/api-client.js'
+import { apiGet, localCloudRequiredContent } from '../code-index/api-client.js'
 
 export const GetOwnershipSchema = z.object({
   workspace_id: z.string().min(1).describe('Workspace to query ownership rules from'),
@@ -9,6 +9,8 @@ export const GetOwnershipSchema = z.object({
 
 export async function getOwnershipHandler(raw: unknown) {
   const args = GetOwnershipSchema.parse(raw)
+  const guard = localCloudRequiredContent('ownership')
+  if (guard) return guard
 
   const encoded = encodeURIComponent(args.path)
   const params = new URLSearchParams({ workspace_id: args.workspace_id })

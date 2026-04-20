@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { apiPost } from '../code-index/api-client.js'
+import { apiPost, localCloudRequiredContent } from '../code-index/api-client.js'
 
 export const LinkDecisionSchema = z.object({
   decision_id: z.string().min(1).describe('ID of the decision to link from'),
@@ -17,6 +17,8 @@ export const LinkDecisionSchema = z.object({
 
 export async function linkDecisionHandler(raw: unknown) {
   const args = LinkDecisionSchema.parse(raw)
+  const guard = localCloudRequiredContent('decisions')
+  if (guard) return guard
 
   const result = await apiPost<{ id: string }>(
     `/code-graph/decisions/${args.decision_id}/links`,

@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { apiPost } from '../code-index/api-client.js'
+import { apiPost, localCloudRequiredContent } from '../code-index/api-client.js'
 
 export const SetDomainMembershipSchema = z.object({
   domain_id: z.string().min(1).describe('Existing Domain ID (Domain rows are created separately via the web app / API, NOT by this tool). Obtain from the domains list in the Tentra web UI. Example: "dom_payments".'),
@@ -13,6 +13,8 @@ export const SetDomainMembershipSchema = z.object({
 
 export async function setDomainMembershipHandler(raw: unknown) {
   const args = SetDomainMembershipSchema.parse(raw)
+  const guard = localCloudRequiredContent('domains')
+  if (guard) return guard
 
   const result = await apiPost<{ id: string }>(
     `/code-graph/domains/${args.domain_id}/memberships`,

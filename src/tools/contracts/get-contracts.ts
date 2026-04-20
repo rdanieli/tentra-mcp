@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { apiGet } from '../code-index/api-client.js'
+import { apiGet, localCloudRequiredContent } from '../code-index/api-client.js'
 
 export const GetContractsSchema = z.object({
   workspace_id: z.string().min(1).describe('Workspace to list contracts for'),
@@ -9,6 +9,8 @@ export const GetContractsSchema = z.object({
 
 export async function getContractsHandler(raw: unknown) {
   const args = GetContractsSchema.parse(raw)
+  const guard = localCloudRequiredContent('contracts')
+  if (guard) return guard
 
   const params = new URLSearchParams({ workspace_id: args.workspace_id })
   if (args.kind) params.set('kind', args.kind)

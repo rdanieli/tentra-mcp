@@ -7,7 +7,10 @@ import { homedir } from 'os'
 import { fileURLToPath } from 'url'
 
 const args = process.argv.slice(2)
-const subcommand = args[0]
+// First non-flag token is the subcommand (init / reindex / review). Flags like
+// --local / --hosted may precede or follow the subcommand — tolerate both so
+// `npx tentra-mcp --local init` and `npx tentra-mcp init --local` both work.
+const subcommand = args.find(a => !a.startsWith('--') && a !== '-h')
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -19,6 +22,24 @@ function getFlag(name) {
 function hasFlag(name) {
   return args.includes(`--${name}`)
 }
+
+// ─── Backend mode resolution ─────────────────────────────────────────────────
+//
+// --local  → force TENTRA_BACKEND=local. No network, no auth, tier-1 only.
+// --hosted → force TENTRA_BACKEND=hosted. Overrides any local-mode hints in
+//            .tentra/metadata.json (Phase 3 feature).
+// neither  → leave env untouched (current default is hosted if unset).
+//
+// IMPORTANT: this must run BEFORE any `import('../dist/index.js')` or any child
+// spawn, so the bundled server + any subprocesses pick up the right backend.
+const LOCAL_MODE = hasFlag('local')
+const HOSTED_MODE = hasFlag('hosted')
+if (LOCAL_MODE && HOSTED_MODE) {
+  console.error('\x1b[31m✗\x1b[0m --local and --hosted are mutually exclusive.')
+  process.exit(2)
+}
+if (LOCAL_MODE) process.env.TENTRA_BACKEND = 'local'
+if (HOSTED_MODE) process.env.TENTRA_BACKEND = 'hosted'
 
 function findRepoRoot(start) {
   let dir = start
@@ -213,6 +234,25 @@ jobs:
     ok(`Wrote ${written} new config(s), ${skipped} already had Tentra.`)
   }
 
+  // Local-mode banner — swap the "get an API key" story for a "here's your
+  // SQLite file" story. Tier-2 tools (architecture + embeddings) are cut; the
+  // help text points the user at the docs for the full matrix.
+  if (LOCAL_MODE) {
+    log('')
+    log('\x1b[1mRunning in local mode — no network.\x1b[0m')
+    log(`  \x1b[2m~/.tentra/graphs/{repoId}/db.sqlite is your only data.\x1b[0m`)
+    log('')
+    log('\x1b[1mNext steps:\x1b[0m')
+    log('  1. Reload your IDE and ask your agent:')
+    log('     "Index this codebase with Tentra and list the god-nodes"')
+    log('  2. Everything stays on this machine. No API key needed.')
+    log(`  3. Tier-2 tools (architecture diagrams, embeddings) require hosted mode.`)
+    log('')
+    log(`  Local-mode docs: ${webUrl}/docs/local`)
+    log('')
+    process.exit(0)
+  }
+
   log('')
   log('\x1b[1mNext steps:\x1b[0m')
   log(`  1. Get your API key at ${webUrl}/settings`)
@@ -328,7 +368,10 @@ async function runReview() {
     err('No repo_id. Run `npx tentra-mcp init --hook` first, or pass --repo-id.')
     process.exit(1)
   }
-  if (!apiKey) {
+  // Local mode skips the API key check — all review data is served from the
+  // in-process SQLite file via the MCP server spawned below. Hosted mode still
+  // requires a key to hit /code-graph/query endpoints directly.
+  if (!LOCAL_MODE && !apiKey) {
     err('No API key. Pass --key or set TENTRA_API_KEY.')
     process.exit(1)
   }
@@ -340,56 +383,106 @@ async function runReview() {
   }
 
   // Reindex current HEAD to get a fresh snapshot.
+  //
+  // Hosted mode: spawn the server, index, kill it, then read review data
+  // directly from /code-graph/query/* HTTP endpoints (fast path).
+  //
+  // Local mode: keep the server alive and send additional tools/call JSON-RPCs
+  // over the same stdio pipe for list_snapshots / list_god_nodes / diff_snapshots.
+  // That avoids duplicating the SQLite-backed query logic in the CLI and reuses
+  // the exact same localDispatch() code paths the MCP tools use.
   const serverPath = join(dirname(fileURLToPath(import.meta.url)), '..', 'dist', 'index.js')
   const child = spawn('node', [serverPath], {
     cwd: root, env: { ...process.env, TENTRA_API_KEY: apiKey, API_URL: url, WEB_URL: url.replace('/api', '') },
     stdio: ['pipe', 'pipe', 'ignore']
   })
-  const newSnapId = await new Promise((resolve, reject) => {
-    let buffer = ''
-    const timer = setTimeout(() => { child.kill(); reject(new Error('index timed out')) }, 5 * 60 * 1000)
-    child.stdout.on('data', (chunk) => {
-      buffer += chunk.toString()
-      let nl
-      while ((nl = buffer.indexOf('\n')) !== -1) {
-        const line = buffer.slice(0, nl); buffer = buffer.slice(nl + 1)
-        if (!line.trim().startsWith('{')) continue
-        try {
-          const msg = JSON.parse(line)
-          if (msg.id === 2 && msg.result?.content?.[0]?.text) {
-            clearTimeout(timer); child.kill()
-            const body = JSON.parse(msg.result.content[0].text)
-            resolve(body.snapshot_id)
-          } else if (msg.id === 2 && msg.error) {
-            clearTimeout(timer); child.kill()
-            reject(new Error(msg.error.message || JSON.stringify(msg.error)))
-          }
-        } catch {}
-      }
-    })
-    const send = (obj) => child.stdin.write(JSON.stringify(obj) + '\n')
-    send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'tentra-review', version: '1' } } })
-    send({ jsonrpc: '2.0', method: 'notifications/initialized' })
-    send({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'index_code', arguments: { repo_path: root, repo_id: repoId, tier: 'tier1', force_reindex: true } } })
+
+  // Dispatch pending JSON-RPC calls by id. Each call gets a fresh id and
+  // resolves when its matching response arrives. Keeps the review pipeline
+  // readable as a series of awaited tool calls rather than nested callbacks.
+  const pending = new Map()
+  let nextId = 1
+  let buffer = ''
+  child.stdout.on('data', (chunk) => {
+    buffer += chunk.toString()
+    let nl
+    while ((nl = buffer.indexOf('\n')) !== -1) {
+      const line = buffer.slice(0, nl); buffer = buffer.slice(nl + 1)
+      if (!line.trim().startsWith('{')) continue
+      try {
+        const msg = JSON.parse(line)
+        const resolver = pending.get(msg.id)
+        if (!resolver) continue
+        pending.delete(msg.id)
+        if (msg.result) resolver.resolve(msg.result)
+        else resolver.reject(new Error(msg.error?.message || JSON.stringify(msg.error)))
+      } catch { /* not JSON / not ours */ }
+    }
   })
+  const callTool = (name, argumentsObj, timeoutMs = 5 * 60 * 1000) =>
+    new Promise((resolve, reject) => {
+      const id = ++nextId
+      pending.set(id, { resolve, reject })
+      const t = setTimeout(() => {
+        pending.delete(id)
+        reject(new Error(`${name} timed out after ${timeoutMs}ms`))
+      }, timeoutMs)
+      const origResolve = resolve, origReject = reject
+      pending.set(id, {
+        resolve: (r) => { clearTimeout(t); origResolve(r) },
+        reject: (e) => { clearTimeout(t); origReject(e) }
+      })
+      child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id, method: 'tools/call', params: { name, arguments: argumentsObj } }) + '\n')
+    })
+  const parseToolResult = (result) => JSON.parse(result?.content?.[0]?.text ?? '{}')
 
-  // Pick base snapshot: explicit arg wins; else second-most-recent for this repo.
-  const snapList = await fetchJson(`/code-graph/query/snapshots/${encodeURIComponent(repoId)}`)
-  const snaps = snapList.snapshots || []
-  const baseSnap = baseSnapshotArg || snaps.find(s => s.id !== newSnapId)?.id
-  if (!baseSnap) {
-    // First-ever index — emit a "welcome" review instead of a diff.
-    const godNodes = await fetchJson(`/code-graph/query/god-nodes?snapshot_id=${newSnapId}&top_n=5`)
-    console.log(renderWelcomeReview(newSnapId, godNodes))
+  child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'tentra-review', version: '1' } } }) + '\n')
+  child.stdin.write(JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }) + '\n')
+
+  try {
+    const indexResult = await callTool('index_code', { repo_path: root, repo_id: repoId, tier: 'tier1', force_reindex: true })
+    const indexBody = parseToolResult(indexResult)
+    const newSnapId = indexBody.snapshot_id
+    if (!newSnapId) throw new Error('index_code returned no snapshot_id')
+
+    const webUrl = url.replace('/api', '')
+
+    // ── Fetch review data. Prefer the in-process MCP tools in LOCAL mode (no
+    //    API key, no network); keep the HTTP fast-path for hosted where it's
+    //    meaningfully cheaper than round-tripping JSON-RPC.
+    const fetchSnapshots = async () => LOCAL_MODE
+      ? parseToolResult(await callTool('list_snapshots', { repo_id: repoId }))
+      : await fetchJson(`/code-graph/query/snapshots/${encodeURIComponent(repoId)}`)
+
+    const fetchGodNodes = async (snapId) => LOCAL_MODE
+      ? parseToolResult(await callTool('list_god_nodes', { snapshot_id: snapId, top_n: 5 }))
+      : await fetchJson(`/code-graph/query/god-nodes?snapshot_id=${snapId}&top_n=5`)
+
+    const fetchDiff = async (fromId, toId) => LOCAL_MODE
+      ? parseToolResult(await callTool('diff_snapshots', { from_snapshot_id: fromId, to_snapshot_id: toId }))
+      : await fetchJson(`/code-graph/query/diff?from_id=${fromId}&to_id=${toId}`)
+
+    const snapList = await fetchSnapshots()
+    const snaps = snapList.snapshots || []
+    const baseSnap = baseSnapshotArg || snaps.find(s => s.id !== newSnapId)?.id
+    if (!baseSnap) {
+      const godNodes = await fetchGodNodes(newSnapId)
+      console.log(renderWelcomeReview(newSnapId, godNodes))
+      child.kill()
+      process.exit(0)
+    }
+
+    const [diff, godNodes] = await Promise.all([
+      fetchDiff(baseSnap, newSnapId),
+      fetchGodNodes(newSnapId)
+    ])
+    console.log(renderDiffReview({ baseSnap, newSnapId, diff, godNodes, webUrl }))
+    child.kill()
     process.exit(0)
+  } catch (e) {
+    try { child.kill() } catch {}
+    throw e
   }
-
-  const [diff, godNodes] = await Promise.all([
-    fetchJson(`/code-graph/query/diff?from_id=${baseSnap}&to_id=${newSnapId}`),
-    fetchJson(`/code-graph/query/god-nodes?snapshot_id=${newSnapId}&top_n=5`)
-  ])
-  console.log(renderDiffReview({ baseSnap, newSnapId, diff, godNodes, webUrl: url.replace('/api', '') }))
-  process.exit(0)
 }
 
 // ─── Render helpers ──────────────────────────────────────────────────────────
@@ -655,6 +748,9 @@ if (subcommand === 'reindex') {
     npx tentra-mcp review                   # markdown diff review — pipe to gh pr comment
     npx tentra-mcp                          # start the MCP stdio server
     npx tentra-mcp --key YOUR_API_KEY       # start with an existing API key
+    npx tentra-mcp --local init             # offline install — no account, no API key
+    npx tentra-mcp --local reindex          # refresh the local SQLite graph
+    npx tentra-mcp --local                  # start the MCP server against local SQLite
 
   SUBCOMMANDS:
     init           Detect installed IDEs (Cursor, Claude Code, Codex, Windsurf) and
@@ -667,6 +763,13 @@ if (subcommand === 'reindex') {
                    your CI to get auto-review on every PR.
     (default)      Start the MCP stdio server — connects to https://trytentra.com
                    and exposes 33 tools to your IDE over stdio.
+
+  BACKEND MODES:
+    --local        Use a local SQLite graph in ~/.tentra/graphs/{repoId}/db.sqlite.
+                   No network, no account, no API key. Tier-1 tools only (queries,
+                   refactor, review). Architecture + embeddings require hosted mode.
+    --hosted       Force hosted mode (default). Overrides any local-mode hints in
+                   .tentra/metadata.json.
 
   OPTIONS:
     --key <key>      Tentra API key. Without it, device-flow auth runs on first

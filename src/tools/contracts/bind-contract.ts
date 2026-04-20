@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { apiPost } from '../code-index/api-client.js'
+import { apiPost, localCloudRequiredContent } from '../code-index/api-client.js'
 
 export const BindContractSchema = z.object({
   contract_id: z.string().min(1).describe('Contract ID (from record_contract result)'),
@@ -11,6 +11,8 @@ export const BindContractSchema = z.object({
 
 export async function bindContractHandler(raw: unknown) {
   const args = BindContractSchema.parse(raw)
+  const guard = localCloudRequiredContent('contracts')
+  if (guard) return guard
 
   const result = await apiPost<{ id: string; relation: string }>(
     `/code-graph/contracts/${args.contract_id}/bindings`,

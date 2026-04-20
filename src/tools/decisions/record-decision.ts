@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { apiPost } from '../code-index/api-client.js'
+import { apiPost, localCloudRequiredContent } from '../code-index/api-client.js'
 
 const LinkInputSchema = z.object({
   entity_type: z.enum(['service', 'file', 'symbol', 'contract', 'domain']),
@@ -25,6 +25,8 @@ export const RecordDecisionSchema = z.object({
 
 export async function recordDecisionHandler(raw: unknown) {
   const args = RecordDecisionSchema.parse(raw)
+  const guard = localCloudRequiredContent('decisions')
+  if (guard) return guard
 
   const result = await apiPost<{ id: string; slug: string; status: string; links: unknown[] }>(
     '/code-graph/decisions',

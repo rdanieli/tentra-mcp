@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { apiGet } from '../code-index/api-client.js'
+import { apiGet, currentBackend } from '../code-index/api-client.js'
 
 export const ExplainCodebaseSchema = z.object({
   repo_id: z.string().min(1).describe('CodeRepo id (from index_code / list_snapshots). The repo whose graph you want narrated.'),
@@ -7,12 +7,12 @@ export const ExplainCodebaseSchema = z.object({
   format: z.enum(['markdown', 'json']).default('markdown').describe('"markdown" (default) returns an agent-ready narrative walkthrough. "json" returns the structured aggregation for downstream tooling.')
 })
 
-// The markdown endpoint returns raw markdown text, NOT JSON. The JSON endpoint
-// returns a structured object. We transparently pass both through as the `text`
-// of a single content block so the calling agent can read either shape.
+// The hosted markdown endpoint returns raw text (Content-Type: text/markdown),
+// not JSON. We reach under the api-client for that one case — but ONLY for the
+// hosted backend. In local mode the dispatch returns a JS object with a
+// `__raw__` string for the markdown case and the structured payload for JSON,
+// so we route through apiGet either way when BACKEND=local.
 async function fetchRaw(path: string): Promise<string> {
-  // Reach into the api-client pattern: same auth + base URL, but we want the
-  // raw response body (markdown) instead of JSON. Duplicate just the auth step.
   const { getCredentials } = await import('../../auth.js')
   const creds = await getCredentials()
   if (!creds) throw new Error('not authenticated')
@@ -31,6 +31,12 @@ export async function explainCodebaseHandler(raw: unknown) {
   const path = `/code-graph/query/explain/${encodeURIComponent(args.repo_id)}?${params}`
 
   if (args.format === 'markdown') {
+    if (currentBackend() === 'local') {
+      // Local dispatch returns { __raw__: "...markdown..." }.
+      const payload = await apiGet<{ __raw__?: string }>(path)
+      const text = typeof payload?.__raw__ === 'string' ? payload.__raw__ : JSON.stringify(payload)
+      return { content: [{ type: 'text' as const, text }] }
+    }
     const text = await fetchRaw(path)
     return { content: [{ type: 'text' as const, text }] }
   }

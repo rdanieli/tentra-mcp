@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { apiPost } from '../code-index/api-client.js'
+import { apiPost, localCloudRequiredContent } from '../code-index/api-client.js'
 
 export const RecordContractSchema = z.object({
   workspace_id: z.string().min(1).describe('Workspace to store contract in'),
@@ -15,6 +15,8 @@ export const RecordContractSchema = z.object({
 
 export async function recordContractHandler(raw: unknown) {
   const args = RecordContractSchema.parse(raw)
+  const guard = localCloudRequiredContent('contracts')
+  if (guard) return guard
 
   const result = await apiPost<{ id: string; name: string; kind: string }>(
     '/code-graph/contracts',

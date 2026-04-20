@@ -10,6 +10,7 @@ import { GetIndexJobSchema, getIndexJobHandler } from './tools/code-index/get-in
 import { QuerySymbolsSchema, querySymbolsHandler } from './tools/code-query/query-symbols.js'
 import { FindReferencesSchema, findReferencesHandler } from './tools/code-query/find-references.js'
 import { SafeRenameSchema, safeRenameHandler } from './tools/code-query/safe-rename.js'
+import { ExplainCodebaseSchema, explainCodebaseHandler } from './tools/code-query/explain-codebase.js'
 import { GetSymbolNeighborsSchema, getSymbolNeighborsHandler } from './tools/code-query/get-symbol-neighbors.js'
 import { GetServiceCodeGraphSchema, getServiceCodeGraphHandler } from './tools/code-query/get-service-code-graph.js'
 import { ExplainCodePathSchema, explainCodePathHandler } from './tools/code-query/explain-code-path.js'
@@ -767,6 +768,19 @@ IMPORTANT — side effects: NONE. Tentra never writes files. This tool returns a
 Prerequisites: Tentra API auth + a symbol_id from query_symbols + the matching snapshot_id + a valid new identifier (letters / digits / underscores, cannot start with a digit — whitespace and special characters are rejected). Read-only. Response: { target: { id, qualifiedName, oldName, newName, fanIn, fanOut, isGodNode }, definition: { filePath, startLine, endLine } | null, references: [{ kind, edgeType, fromSymbolId, fromQualifiedName, fromKind, filePath, startLine, endLine, callCount, isTest }], summary: { totalReferences, distinctCallers, fileCount, warnings: string[] } }.`,
   SafeRenameSchema.shape,
   async (args) => { await ensureAuth(); return safeRenameHandler(args) }
+)
+
+// ─── Tool: explain_codebase ──────────────────────────────────────────────────
+
+server.tool(
+  'explain_codebase',
+  `Produce an agent-ready narrative walkthrough of a whole repo — "what is this codebase?" answered in a single tool call from the indexed code graph. The onboarding tour: Start here / Structure / Architectural hotspots / Domains / Decisions / Contracts / Snapshot info, all assembled from data we already have so a senior-level summary takes seconds, not minutes of file-reading.
+
+Unlike list_god_nodes (one ranked list of symbols) or sync_architecture (drift check against a saved diagram), explain_codebase is the BIRD'S-EYE narrative: opinionated picks for the most important symbol, the most recent ADR, the primary domain; language + LOC + top-level directory breakdown; ranked hotspots; top domains / ADRs / contracts. Empty sections render hints that point at the enrichment tool you should run next (record_decision, set_domain_membership, record_contract, bind_contract) — so the output doubles as a gap audit. Size-bounded: domain / ADR / contract sections are capped so the markdown stays under ~5KB even on huge repos.
+
+Side effects: NONE — read-only. Prerequisites: Tentra API auth + at least one completed index_code for the repo_id (snapshot_id optional — defaults to the latest). For richer output, seed ADRs via record_decision, domains via set_domain_membership, and contracts via record_contract + bind_contract. Response: format="markdown" (default) returns the full walkthrough as markdown text; format="json" returns the structured aggregation with keys { repoId, repoName, snapshot, startHere, structure, hotspots, domains, domainsTotal, decisions, decisionsTotal, contracts, contractsTotal }.`,
+  ExplainCodebaseSchema.shape,
+  async (args) => { await ensureAuth(); return explainCodebaseHandler(args) }
 )
 
 // ─── Tool: get_symbol_neighbors ──────────────────────────────────────────────

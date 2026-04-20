@@ -53,6 +53,11 @@ interface ArchResponse { id: string; name: string; version: number; url?: string
 let authInProgress: Promise<string> | null = null
 
 async function ensureAuth(): Promise<string> {
+  // Local backend short-circuit: skip credential lookup and device flow entirely.
+  if (process.env.TENTRA_BACKEND === 'local') {
+    return 'local-mode'
+  }
+
   const creds = await getCredentials()
   if (creds) return creds.apiKey
 

@@ -19,7 +19,14 @@ export interface CredentialsFile {
   created_at: string
 }
 
+export const LOCAL_IDENTITY: Credentials = { apiKey: 'local-mode', apiUrl: 'local://' }
+
 export async function getCredentials(credsPath: string = DEFAULT_CREDS_PATH): Promise<Credentials | null> {
+  // Local backend short-circuit: never read disk, never trigger device flow.
+  if (process.env.TENTRA_BACKEND === 'local') {
+    return LOCAL_IDENTITY
+  }
+
   const envKey = process.env.TENTRA_API_KEY
   if (envKey) {
     return { apiKey: envKey, apiUrl: API_URL }

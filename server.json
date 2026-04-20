@@ -2,17 +2,17 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.rdanieli/tentra",
   "title": "Tentra — Memory for AI Coding Agents",
-  "description": "Memory for AI coding agents. Persistent code graph + AI architecture diagrams. 32 MCP tools.",
+  "description": "Memory for AI coding agents. Persistent code graph + AI architecture diagrams. 34 MCP tools.",
   "repository": {
     "url": "https://github.com/rdanieli/tentra-mcp",
     "source": "github"
   },
-  "version": "1.2.5",
+  "version": "1.2.6",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "tentra-mcp",
-      "version": "1.2.5",
+      "version": "1.2.6",
       "transport": {
         "type": "stdio"
       },

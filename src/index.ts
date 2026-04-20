@@ -9,6 +9,7 @@ import { RecordSemanticNodeSchema, recordSemanticNodeHandler } from './tools/cod
 import { GetIndexJobSchema, getIndexJobHandler } from './tools/code-index/get-index-job.js'
 import { QuerySymbolsSchema, querySymbolsHandler } from './tools/code-query/query-symbols.js'
 import { FindReferencesSchema, findReferencesHandler } from './tools/code-query/find-references.js'
+import { SafeRenameSchema, safeRenameHandler } from './tools/code-query/safe-rename.js'
 import { GetSymbolNeighborsSchema, getSymbolNeighborsHandler } from './tools/code-query/get-symbol-neighbors.js'
 import { GetServiceCodeGraphSchema, getServiceCodeGraphHandler } from './tools/code-query/get-service-code-graph.js'
 import { ExplainCodePathSchema, explainCodePathHandler } from './tools/code-query/explain-code-path.js'
@@ -751,6 +752,21 @@ Unlike query_symbols (which takes a NAME and returns candidate symbols), find_re
 Prerequisites: Tentra API auth + a symbol_id from query_symbols + the matching snapshot_id. Read-only. Response: { target, resolvedCount, unresolvedCount, fileScopeCount, references: [{ kind: 'resolved'|'unresolved', edgeType, fromQualifiedName, fromKind, filePath, startLine, endLine, callCount }] }.`,
   FindReferencesSchema.shape,
   async (args) => { await ensureAuth(); return findReferencesHandler(args) }
+)
+
+// ─── Tool: safe_rename ───────────────────────────────────────────────────────
+
+server.tool(
+  'safe_rename',
+  `Return a structured PATCH PLAN for renaming a symbol — definition site + every call site with exact file paths and line ranges — so the calling agent can apply the rewrite with its own Edit/MultiEdit tools. The canonical "rename without breaking hidden callers" tool.
+
+Unlike find_references (which only returns callers), safe_rename also returns the symbol's own declaration site (which the agent must also rewrite) and packages everything with a summary + warnings into a plan ready for programmatic application. Unlike a plain grep-and-replace, the call sites come from the resolved code graph — you won't accidentally rename "log" the method and "log" the string in one pass. The agent grep-replaces oldName → newName within each reference's startLine..endLine range (scoped to that caller's body), NOT a whole-file rename, so unrelated symbols sharing the same short name stay untouched.
+
+IMPORTANT — side effects: NONE. Tentra never writes files. This tool returns a plan only; the agent is responsible for applying the edits, which keeps the rewrite safe-by-default (dry-run, diff, rollback all stay in the agent's hands). If target.fanIn is above the god-node threshold, a warning fires so the agent double-checks before blasting out changes. If include_unresolved=true, best-effort short-name matches are included with a warning that they may not all be the target.
+
+Prerequisites: Tentra API auth + a symbol_id from query_symbols + the matching snapshot_id + a valid new identifier (letters / digits / underscores, cannot start with a digit — whitespace and special characters are rejected). Read-only. Response: { target: { id, qualifiedName, oldName, newName, fanIn, fanOut, isGodNode }, definition: { filePath, startLine, endLine } | null, references: [{ kind, edgeType, fromSymbolId, fromQualifiedName, fromKind, filePath, startLine, endLine, callCount, isTest }], summary: { totalReferences, distinctCallers, fileCount, warnings: string[] } }.`,
+  SafeRenameSchema.shape,
+  async (args) => { await ensureAuth(); return safeRenameHandler(args) }
 )
 
 // ─── Tool: get_symbol_neighbors ──────────────────────────────────────────────

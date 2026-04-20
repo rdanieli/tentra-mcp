@@ -246,7 +246,7 @@ jobs:
     log('  1. Reload your IDE and ask your agent:')
     log('     "Index this codebase with Tentra and list the god-nodes"')
     log('  2. Everything stays on this machine. No API key needed.')
-    log(`  3. Tier-2 tools (architecture diagrams, embeddings) require hosted mode.`)
+    log(`  3. Architecture diagrams + tier-2 enrichment (contracts, decisions, domains) require hosted mode.`)
     log('')
     log(`  Local-mode docs: ${webUrl}/docs/local`)
     log('')
@@ -766,8 +766,8 @@ if (subcommand === 'reindex') {
 
   BACKEND MODES:
     --local        Use a local SQLite graph in ~/.tentra/graphs/{repoId}/db.sqlite.
-                   No network, no account, no API key. Tier-1 tools only (queries,
-                   refactor, review). Architecture + embeddings require hosted mode.
+                   No network, no account, no API key. Tier-1 tools + embeddings
+                   (pure-JS cosine). Architecture + enrichment require hosted mode.
     --hosted       Force hosted mode (default). Overrides any local-mode hints in
                    .tentra/metadata.json.
 

@@ -27,6 +27,12 @@ import {
   looksLikeLocalVar,
   GraphEdge
 } from './graph-utils.js'
+import {
+  packVector,
+  unpackVector,
+  topKByCosine,
+  EmbeddingCandidate
+} from './embeddings.js'
 import type BetterSqlite3 from 'better-sqlite3'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -344,6 +350,136 @@ const postSemanticNode: Handler = async ({ db, params, body }) => {
     extractedBy: b.extractedBy,
     lensMetadata: b.lensMetadata ?? {},
     extractedAt: new Date().toISOString()
+  }
+}
+
+// ─── Handlers — embeddings (Phase 2) ─────────────────────────────────────────
+//
+// Matches packages/api/src/routes/code-graph/embeddings.ts byte-for-byte in
+// request AND response shape so agent prompts that worked against hosted mode
+// work unchanged against local mode. Swap only the storage / similarity
+// implementation: pure-JS Float32Array cosine instead of pgvector HNSW.
+
+const recordEmbedding: Handler = async ({ db, body }) => {
+  const b = (body ?? {}) as {
+    entity_type?: string
+    entity_id?: string
+    snapshot_id?: string | null
+    model?: string
+    vector?: number[]
+    source_text?: string
+  }
+
+  // Mirror the hosted Zod guard-rails. We don't pull in Zod here to keep the
+  // dispatcher light — manual checks match the same semantics: required
+  // fields, dimension 1..4096, non-empty source text.
+  if (b.entity_type !== 'file' && b.entity_type !== 'symbol') {
+    throw new HttpError(400, 'entity_type must be "file" or "symbol"')
+  }
+  if (!b.entity_id || typeof b.entity_id !== 'string') {
+    throw new HttpError(400, 'entity_id is required')
+  }
+  if (!b.model || typeof b.model !== 'string') {
+    throw new HttpError(400, 'model is required')
+  }
+  if (!Array.isArray(b.vector) || b.vector.length < 1 || b.vector.length > 4096) {
+    throw new HttpError(400, 'vector must be a number[] of length 1..4096')
+  }
+  if (!b.source_text || typeof b.source_text !== 'string') {
+    throw new HttpError(400, 'source_text is required')
+  }
+
+  const id = newId()
+  const packed = packVector(b.vector)
+  db.prepare(`
+    INSERT INTO embeddings (id, entityType, entityId, snapshotId, model, dimension, vector, sourceText)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    id,
+    b.entity_type,
+    b.entity_id,
+    b.snapshot_id ?? null,
+    b.model,
+    b.vector.length,
+    packed,
+    b.source_text
+  )
+
+  // Hosted returns 201 { id, ok: true }. Status code is handled by the HTTP
+  // framework over there; here the dispatcher only returns the body, and the
+  // api-client in local mode treats any resolved promise as success.
+  return { id, ok: true }
+}
+
+const findSimilarCode: Handler = async ({ db, body }) => {
+  const b = (body ?? {}) as {
+    query_vector?: number[]
+    entity_type?: string
+    snapshot_id?: string
+    limit?: number
+  }
+
+  if (!Array.isArray(b.query_vector) || b.query_vector.length < 1 || b.query_vector.length > 4096) {
+    throw new HttpError(400, 'query_vector must be a number[] of length 1..4096')
+  }
+  if (b.entity_type !== undefined && b.entity_type !== 'file' && b.entity_type !== 'symbol') {
+    throw new HttpError(400, 'entity_type (when provided) must be "file" or "symbol"')
+  }
+  const limit = Math.min(Math.max(1, Number(b.limit ?? 10) | 0), 50)
+
+  // Candidate fetch. We pre-filter by snapshot + entity_type + dimension at the
+  // SQL layer so the JS scan only touches rows that can actually match. The
+  // dimension filter is important: an agent might have embeddings from two
+  // models (e.g. 1536 and 3072) in the same snapshot, and mixing dims into the
+  // cosine scan would silently skip them inside topKByCosine. Filtering up
+  // front keeps the scan tight.
+  const dim = b.query_vector.length
+  const clauses: string[] = ['dimension = ?']
+  const params: unknown[] = [dim]
+  if (b.snapshot_id) { clauses.push('snapshotId = ?'); params.push(b.snapshot_id) }
+  if (b.entity_type) { clauses.push('entityType = ?'); params.push(b.entity_type) }
+
+  const rows = db.prepare(`
+    SELECT id, entityType, entityId, snapshotId, model, sourceText, vector
+    FROM embeddings
+    WHERE ${clauses.join(' AND ')}
+  `).all(...params) as Array<{
+    id: string
+    entityType: string
+    entityId: string
+    snapshotId: string | null
+    model: string
+    sourceText: string
+    vector: Buffer
+  }>
+
+  const candidates: EmbeddingCandidate[] = rows.map(r => ({
+    id: r.id,
+    entityType: r.entityType,
+    entityId: r.entityId,
+    snapshotId: r.snapshotId,
+    model: r.model,
+    sourceText: r.sourceText,
+    vector: unpackVector(r.vector)
+  }))
+
+  const query = Float32Array.from(b.query_vector)
+  const hits = topKByCosine(query, candidates, limit)
+
+  // Response shape matches packages/api/src/routes/code-graph/embeddings.ts:
+  //   { results: [{ id, entityType, entityId, sourceText, distance }] }
+  // The hosted EmbeddingsClient also returns entityType + entityId exactly as
+  // stored. We do NOT include the raw vector or the snapshotId/model fields
+  // (hosted omits them from the response too), keeping the two modes byte-for
+  // -byte compatible.
+  return {
+    results: hits.map(h => ({
+      id: h.id,
+      entityType: h.entityType,
+      entityId: h.entityId,
+      sourceText: h.sourceText,
+      distance: h.distance
+    }))
   }
 }
 
@@ -1156,6 +1292,17 @@ register('POST', '/code-graph/jobs/:id/complete', postJobComplete, (p) => lookup
 register('GET', '/code-graph/jobs/:id', getJob, (p) => lookupRepoForEntity(p.id))
 register('POST', '/code-graph/semantics', postSemanticNode, (_p, body) => lookupRepoForEntity((body?.snapshotId as string) ?? ''))
 
+// Embeddings (Phase 2). snapshot_id is optional on the wire; when present we
+// can pin the write to the correct repo DB. When absent, we fall back to the
+// shared "default" DB (same policy as other cross-repo reads). Searches prefer
+// snapshot_id when the caller supplies it.
+register('POST', '/code-graph/embeddings', recordEmbedding, (_p, body) =>
+  lookupRepoForEntity((body?.snapshot_id as string) ?? '')
+)
+register('POST', '/code-graph/embeddings/search', findSimilarCode, (_p, body) =>
+  lookupRepoForEntity((body?.snapshot_id as string) ?? '')
+)
+
 // Read path
 register('GET', '/code-graph/query/snapshots/:repoId', getSnapshotsByRepo, (p) => p.repoId)
 register('GET', '/code-graph/query/symbols', querySymbols, (_p, _b, q) => lookupRepoForEntity(q?.snapshot_id ?? ''))
@@ -1180,18 +1327,17 @@ const CLOUD_REQUIRED_MESSAGE = 'Requires hosted mode. See trytentra.com/docs/loc
 
 /**
  * Endpoints that exist on the hosted API but are intentionally disabled in
- * local mode for Phase 1. Returning a structured error here (rather than 404)
- * keeps the MCP tool responses legible — the agent sees "embeddings need hosted"
- * instead of "500 path not found".
+ * local mode. Returning a structured error here (rather than 404) keeps the
+ * MCP tool responses legible — the agent sees "foo needs hosted" instead of
+ * "500 path not found".
  *
- * Exact matches cover the short list of direct endpoints (embeddings). Prefix
- * matches (see CLOUD_ONLY_PREFIXES) handle enrichment routes that carry IDs
- * in the path (contracts/:id/bindings, decisions/:id/links, etc.).
+ * Phase 2 (this change) removes embeddings from this set — both record and
+ * search now run against local SQLite. Prefix matches (see
+ * CLOUD_ONLY_PREFIXES) still handle enrichment routes (contracts, decisions,
+ * domains, ownership) that require hosted Postgres schemas Phase 2 doesn't
+ * port.
  */
-const CLOUD_ONLY = new Set<string>([
-  'POST /code-graph/embeddings',
-  'POST /code-graph/embeddings/search'
-])
+const CLOUD_ONLY = new Set<string>([])
 
 // Paths starting with any of these (method-scoped) resolve to the cloud-required
 // response. Covers tier-2 enrichment tools that Phase 1 does NOT back with local
@@ -1211,7 +1357,7 @@ const CLOUD_ONLY_PREFIXES: Array<{ method: string; prefix: string; scope: string
 // tag used in the structured error payload, or null if the request is local-ok.
 function matchCloudOnly(method: string, rawPath: string): string | null {
   const key = `${method.toUpperCase()} ${rawPath}`
-  if (CLOUD_ONLY.has(key)) return 'embeddings'
+  if (CLOUD_ONLY.has(key)) return 'cloud-only'
   for (const { method: m, prefix, scope } of CLOUD_ONLY_PREFIXES) {
     if (m === method.toUpperCase() && rawPath.startsWith(prefix)) return scope
   }

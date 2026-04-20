@@ -105,7 +105,7 @@ function extractErrorJson(result: { content?: Array<{ type: string; text: string
   }
 }
 
-describe('CLI local-mode — tier-2 cloud-required audit', () => {
+describe('CLI local-mode — cloud-required audit (architecture + enrichment)', () => {
   let client: McpStdioClient
   let tentraHome: string
 
@@ -131,10 +131,13 @@ describe('CLI local-mode — tier-2 cloud-required audit', () => {
     if (tentraHome) rmSync(tentraHome, { recursive: true, force: true })
   })
 
-  // 14 cloud-required tools: 9 architecture + 2 embeddings + 3 enrichment-write
-  // (contracts + decisions + mappings — we spot-check one per namespace).
-  // Enrichment-read (get_contracts / get_decisions_for / get_ownership) is
-  // exercised on top to confirm GET paths also short-circuit.
+  // 12 cloud-required tools: 9 architecture + 3 enrichment-write (contracts +
+  // decisions + mappings — one per namespace). Enrichment-read
+  // (get_contracts / get_decisions_for / get_ownership) is exercised below to
+  // confirm GET paths also short-circuit.
+  //
+  // Phase 2 note: find_similar_code + record_embedding USED to live here and
+  // no longer do — they run against local SQLite now (see embeddings.test.ts).
   const cloudRequiredCases: Array<{ name: string; args: Record<string, unknown> }> = [
     // Architecture (9)
     { name: 'create_architecture', args: { name: 'X', services: [{ id: 's', type: 'service', responsibility: 'r' }], connections: [] } },
@@ -146,9 +149,6 @@ describe('CLI local-mode — tier-2 cloud-required audit', () => {
     { name: 'sync_architecture', args: { architectureId: 'arch_x', codebasePath: '/tmp/nonexistent' } },
     { name: 'export_architecture', args: { id: 'arch_x', format: 'mermaid' } },
     { name: 'create_flow', args: { architectureId: 'arch_x', flow: { id: 'f', name: 'F', steps: [{ id: 's1', type: 'intro', title: 'start' }] } } },
-    // Embeddings (2)
-    { name: 'find_similar_code', args: { query_vector: [0.1, 0.2, 0.3] } },
-    { name: 'record_embedding', args: { entity_type: 'file', entity_id: 'f_x', model: 'm', vector: [0.1], source_text: 't' } },
     // Enrichment write (3)
     { name: 'record_contract', args: { workspace_id: 'ws', kind: 'http', name: 'n', version: '1' } },
     { name: 'record_decision', args: { workspace_id: 'ws', slug: 'adr', title: 't', context: 'c', decision: 'd', consequences: 'x' } },

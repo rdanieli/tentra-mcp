@@ -892,11 +892,13 @@ Prerequisites: Tentra API auth + two symbol_ids from query_symbols + the snapsho
 
 server.tool(
   'find_similar_code',
-  `Run a pgvector cosine-similarity search over agent-generated embeddings stored via record_embedding. Pass a pre-computed query_vector (you must embed your text first with your own embedding capability — this tool does NOT embed for you) and optionally restrict by entity_type or snapshot_id. Returns the most semantically similar files or symbols.
+  `Run a cosine-similarity search over agent-generated embeddings stored via record_embedding. Pass a pre-computed query_vector (you must embed your text first with your own embedding capability — this tool does NOT embed for you) and optionally restrict by entity_type or snapshot_id. Returns the most semantically similar files or symbols.
+
+Works in both hosted mode (pgvector HNSW on Postgres) and local mode (pure-JS full-scan cosine over the SQLite embeddings table). The response shape is identical in both modes so agent prompts don't need to branch on backend.
 
 Unlike query_symbols (exact/fuzzy NAME match on qualifiedName), find_similar_code matches MEANING — "rate limiting logic" will return files implementing throttles even if the word "rate-limit" never appears. Only useful after you've seeded embeddings for the target corpus via record_embedding; if no embeddings exist, results will be empty.
 
-Prerequisites: Tentra API auth + at least one record_embedding call against the snapshot you're querying + a caller-generated query_vector of matching dimension. Read-only. Response: { results: [{ entityType, entityId, snapshotId, model, similarity, sourceText }] } sorted by cosine similarity desc.`,
+Prerequisites: Tentra API auth (hosted) OR TENTRA_BACKEND=local + at least one record_embedding call against the snapshot you're querying + a caller-generated query_vector of matching dimension. Read-only. Response: { results: [{ id, entityType, entityId, sourceText, distance }] } sorted by cosine distance ascending (closest first).`,
   FindSimilarCodeSchema.shape,
   async (args) => { await ensureAuth(); return findSimilarCodeHandler(args) }
 )
@@ -907,9 +909,11 @@ server.tool(
   'record_embedding',
   `Persist ONE pre-computed embedding vector for a file or symbol so it becomes searchable via find_similar_code. You must produce the vector yourself (the agent embeds the source_text with whatever model it has access to) — Tentra stores vector + source_text + model identifier but does not call any embedding API on your behalf.
 
-Use in a loop after index_code to seed the vector index: for each file or symbol you care about, embed a representative snippet (function signature + doc comment, or file summary) and record it. Unlike record_semantic_node (human-readable purpose stored in CodeSemantic), record_embedding stores a dense vector in pgvector for cosine search. The two are complementary, not alternatives.
+Works in both hosted mode (pgvector column on Postgres) and local mode (Float32Array BLOB on SQLite). Request and response shapes are identical across modes.
 
-Prerequisites: Tentra API auth + a file_id or symbol_id from a completed index_code + a vector you already computed. Write path. Side effect: inserts into the embeddings table. Response: { id, ok: true }.`,
+Use in a loop after index_code to seed the vector index: for each file or symbol you care about, embed a representative snippet (function signature + doc comment, or file summary) and record it. Unlike record_semantic_node (human-readable purpose stored in CodeSemantic), record_embedding stores a dense vector for cosine search. The two are complementary, not alternatives.
+
+Prerequisites: Tentra API auth (hosted) OR TENTRA_BACKEND=local + a file_id or symbol_id from a completed index_code + a vector you already computed. Write path. Side effect: inserts into the embeddings table. Response: { id, ok: true }.`,
   RecordEmbeddingSchema.shape,
   async (args) => { await ensureAuth(); return recordEmbeddingHandler(args) }
 )

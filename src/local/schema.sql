@@ -121,3 +121,31 @@ CREATE TABLE IF NOT EXISTS code_semantics (
 );
 CREATE INDEX IF NOT EXISTS idx_code_semantics_file   ON code_semantics(fileId);
 CREATE INDEX IF NOT EXISTS idx_code_semantics_symbol ON code_semantics(symbolId);
+
+-- Phase 2 — embeddings.
+--
+-- Stores agent-generated dense vectors for files / symbols. Pure-JS cosine
+-- similarity runs at query time; no native extension needed. The schema
+-- mirrors packages/api/prisma/schema.prisma's `embeddings` table (entityType
+-- + entityId instead of hosted pgvector's FK split) so the hosted and local
+-- API response shapes stay identical byte-for-byte.
+--
+-- IF NOT EXISTS keeps this block safe to re-run against Phase 1 DBs that were
+-- created before Phase 2 shipped — getDb() re-applies loadSchema() on every
+-- open, so existing DBs get the new table added transparently.
+
+CREATE TABLE IF NOT EXISTS embeddings (
+  id          TEXT PRIMARY KEY,
+  entityType  TEXT NOT NULL,       -- 'file' | 'symbol'
+  entityId    TEXT NOT NULL,
+  snapshotId  TEXT,                -- nullable: caller may embed outside a snapshot
+  model       TEXT NOT NULL,
+  dimension   INTEGER NOT NULL,
+  vector      BLOB NOT NULL,       -- packed Float32Array (4 bytes × dimension)
+  sourceText  TEXT NOT NULL,
+  createdAt   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  FOREIGN KEY (snapshotId) REFERENCES code_snapshots(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_embeddings_snapshot ON embeddings(snapshotId);
+CREATE INDEX IF NOT EXISTS idx_embeddings_model    ON embeddings(snapshotId, model);
+CREATE INDEX IF NOT EXISTS idx_embeddings_entity   ON embeddings(entityType, entityId);

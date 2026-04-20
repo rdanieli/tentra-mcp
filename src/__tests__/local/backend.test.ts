@@ -169,10 +169,32 @@ describe('local backend — end-to-end tier-1 round-trip', () => {
     expect(indexModule).toBeDefined // silence unused var
   })
 
-  it('embeddings endpoints return structured cloudRequired response', async () => {
-    const resp = await localDispatch<{ error: string; scope: string }>(
-      'POST', '/code-graph/embeddings', { entity_type: 'file', entity_id: 'x' }
+  it('embeddings endpoints are now backed by local SQLite (Phase 2)', async () => {
+    // Record a small embedding and read it back via search — end-to-end offline.
+    const { snapshotId, fooSymId } = await seedSnapshot()
+    const dim = 8
+    const vec = [1, 0, 0, 0, 0, 0, 0, 0]
+    const rec = await localDispatch<{ id: string; ok: boolean }>(
+      'POST', '/code-graph/embeddings',
+      {
+        entity_type: 'symbol',
+        entity_id: fooSymId,
+        snapshot_id: snapshotId,
+        model: 'test-model',
+        vector: vec,
+        source_text: 'function foo() {}'
+      }
     )
-    expect(resp.error).toMatch(/Requires hosted mode/)
+    expect(rec.ok).toBe(true)
+    expect(rec.id).toBeTruthy()
+
+    const search = await localDispatch<{ results: Array<{ id: string; entityId: string; distance: number }> }>(
+      'POST', '/code-graph/embeddings/search',
+      { query_vector: vec, snapshot_id: snapshotId, limit: 5 }
+    )
+    expect(search.results.length).toBeGreaterThan(0)
+    expect(search.results[0].entityId).toBe(fooSymId)
+    // Identical vector → distance ≈ 0 (floating point wiggle under 1e-5).
+    expect(search.results[0].distance).toBeLessThan(1e-5)
   })
 })

@@ -33,11 +33,11 @@ From here on, every `git commit` fires a background re-index. Your agents stay c
 
 ## What is Tentra?
 
-Tentra is the persistent memory layer for AI coding agents. Describe a system — get a diagram and 14-framework code exports. Index your repo — agents query a structured graph of files, symbols, imports, and call edges instead of re-grepping source every session.
+Tentra is an AI-native architecture platform for engineering teams. Describe a system — get a diagram and 14-framework code exports. Index your repo — agents query a structured graph of files, symbols, imports, and call edges instead of re-grepping source every session.
 
-This MCP server gives your AI assistant **32 tools**:
+This MCP server gives your AI assistant **36 tools**:
 
-### Architecture (9 tools)
+### Architecture (10 tools)
 | Tool | Description |
 |------|-------------|
 | `create_architecture` | Design a new system from a description |
@@ -47,6 +47,7 @@ This MCP server gives your AI assistant **32 tools**:
 | `analyze_codebase` | Scan local code and generate diagram |
 | `lint_architecture` | Quality checks (9 rules: orphans, SPOFs, god services) |
 | `sync_architecture` | Detect drift between diagram and code |
+| `get_spec_alignment` | Mid-implementation drift check — changed files in, spec context + drift signals out |
 | `export_architecture` | Export to 14 frameworks (Java, Python, Go, Rust, etc.) |
 | `create_flow` | Create step-by-step flow visualization |
 
@@ -58,10 +59,13 @@ This MCP server gives your AI assistant **32 tools**:
 | `record_semantic_node` | Persist an agent-extracted semantic annotation |
 | `get_index_job` | Check status of an indexing job |
 
-### Code Graph — Read (10 tools)
+### Code Graph — Read (13 tools)
 | Tool | Description |
 |------|-------------|
 | `query_symbols` | Fuzzy trigram search across indexed symbols |
+| `find_references` | Every resolved caller of a symbol — refactor-safety primitive |
+| `safe_rename` | Patch plan (definition + every call site) for renaming a symbol |
+| `explain_codebase` | Agent-ready narrative walkthrough of a whole repo |
 | `get_symbol_neighbors` | BFS traversal in the call/import graph |
 | `get_service_code_graph` | Subgraph for a canvas service |
 | `explain_code_path` | Shortest path between two symbols with semantic context |

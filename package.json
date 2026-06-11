@@ -1,7 +1,7 @@
 {
   "name": "tentra-mcp",
-  "version": "1.2.0",
-  "description": "Tentra MCP — memory for AI coding agents. Persistent code graph + AI-generated architecture diagrams. 32 tools for Cursor, Claude Code, Codex, Windsurf.",
+  "version": "1.3.3",
+  "description": "Tentra MCP — AI-native architecture platform. Diagrams from prompts, 14-framework code export, drift detection, persistent code graph. 36 tools for Cursor, Claude Code, Codex, Windsurf.",
   "type": "module",
   "main": "dist/index.js",
   "bin": {

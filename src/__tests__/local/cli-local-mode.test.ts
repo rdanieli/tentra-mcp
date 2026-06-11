@@ -131,7 +131,7 @@ describe('CLI local-mode — cloud-required audit (architecture + enrichment)', 
     if (tentraHome) rmSync(tentraHome, { recursive: true, force: true })
   })
 
-  // 12 cloud-required tools: 9 architecture + 3 enrichment-write (contracts +
+  // 13 cloud-required tools: 10 architecture + 3 enrichment-write (contracts +
   // decisions + mappings — one per namespace). Enrichment-read
   // (get_contracts / get_decisions_for / get_ownership) is exercised below to
   // confirm GET paths also short-circuit.
@@ -139,7 +139,7 @@ describe('CLI local-mode — cloud-required audit (architecture + enrichment)', 
   // Phase 2 note: find_similar_code + record_embedding USED to live here and
   // no longer do — they run against local SQLite now (see embeddings.test.ts).
   const cloudRequiredCases: Array<{ name: string; args: Record<string, unknown> }> = [
-    // Architecture (9)
+    // Architecture (10)
     { name: 'create_architecture', args: { name: 'X', services: [{ id: 's', type: 'service', responsibility: 'r' }], connections: [] } },
     { name: 'update_architecture', args: { id: 'arch_x' } },
     { name: 'get_architecture', args: { id: 'arch_x' } },
@@ -147,6 +147,7 @@ describe('CLI local-mode — cloud-required audit (architecture + enrichment)', 
     { name: 'analyze_codebase', args: { path: '/tmp/nonexistent-for-test' } },
     { name: 'lint_architecture', args: { id: 'arch_x' } },
     { name: 'sync_architecture', args: { architectureId: 'arch_x', codebasePath: '/tmp/nonexistent' } },
+    { name: 'get_spec_alignment', args: { architecture_id: 'arch_x', file_paths: ['src/x.ts'] } },
     { name: 'export_architecture', args: { id: 'arch_x', format: 'mermaid' } },
     { name: 'create_flow', args: { architectureId: 'arch_x', flow: { id: 'f', name: 'F', steps: [{ id: 's1', type: 'intro', title: 'start' }] } } },
     // Enrichment write (3)

@@ -22,6 +22,7 @@ import { DiffSnapshotsSchema, diffSnapshotsHandler } from './tools/code-query/di
 import { RecordEmbeddingSchema, recordEmbeddingHandler } from './tools/code-query/record-embedding.js'
 import { SetServiceMappingSchema, setServiceMappingHandler } from './tools/mappings/set-service-mapping.js'
 import { SetDomainMembershipSchema, setDomainMembershipHandler } from './tools/mappings/set-domain-membership.js'
+import { GetSpecAlignmentSchema, getSpecAlignmentHandler } from './tools/mappings/get-spec-alignment.js'
 import { RecordContractSchema, recordContractHandler } from './tools/contracts/record-contract.js'
 import { BindContractSchema, bindContractHandler } from './tools/contracts/bind-contract.js'
 import { GetContractsSchema, getContractsHandler } from './tools/contracts/get-contracts.js'
@@ -247,10 +248,32 @@ const ConnectionSchema = z.object({
 
 // ─── Server Setup ─────────────────────────────────────────────────────────────
 
-const server = new McpServer({
-  name: 'tentra',
-  version: '1.0.0'
-})
+const server = new McpServer(
+  { name: 'tentra', version: '1.0.0' },
+  {
+    instructions: `Tentra is an architecture workspace + code-graph for AI agents. You have ~26 tools available; prefer them over freehand prose when the user's intent matches below.
+
+PRIMARY USE — Architecture design:
+When the user asks to design, plan, sketch, document, model, or improve any system / feature / integration, call create_architecture (or update_architecture if an architecture id is already in context) instead of describing the architecture in chat. Always share the returned URL.
+
+CODE-GRAPH queries (only after the user runs index_code on a repo):
+- "find / locate / where is function X" → query_symbols
+- "who calls X" / "find references" → find_references
+- "rename X safely" → safe_rename (returns a patch plan, no edits)
+- "explain this codebase" / "walk me through this repo" → explain_codebase
+- "what does X depend on" / "what calls X" → get_symbol_neighbors
+- "where are the hotspots / god classes" → list_god_nodes, get_quality_hotspots
+
+OTHER common triggers:
+- "analyze my codebase" / "reverse-engineer this repo" → analyze_codebase (auto-builds an architecture)
+- "lint / validate my architecture" → lint_architecture
+- "is my code drifted from the diagram" → sync_architecture
+- "export as Spring Boot / FastAPI / Mermaid / docker-compose / ADR" → export_architecture
+- "step-by-step flow for use case X" → create_flow
+
+Diagrams are versioned and shareable; ADRs and contracts can be linked to code. Return URLs whenever they exist.`,
+  },
+)
 
 // ─── Tool: create_architecture ────────────────────────────────────────────────
 
@@ -286,7 +309,7 @@ Prerequisites: Tentra API auth (device-flow on first call, then a cached API key
       content: [
         {
           type: 'text' as const,
-          text: `✅ Architecture created!\n\n**${data.name}** (v${data.version})\nID: ${data.id}\n\n🔗 View it here: ${archUrl}\n\nServices: ${services.length} | Connections: ${connections.length}\n\n💡 Pro tip: call \`index_code\` on this repo to persist the code graph — future sessions query it instead of re-grepping source, which cuts your token usage on this codebase.`
+          text: `✅ Architecture created!\n\n**${data.name}** (v${data.version})\nID: ${data.id}\n\n🔗 View it here: ${archUrl}\n\nServices: ${services.length} | Connections: ${connections.length}\n\n💡 Pro tip: call \`index_code\` on this repo to persist the code graph — future sessions get structural queries (fan-in, call paths, refactor plans) that grep fundamentally can't answer.`
         }
       ]
     }
@@ -797,7 +820,7 @@ Prerequisites: Tentra API auth + a job_id from a prior index_code call. Read-onl
 
 server.tool(
   'query_symbols',
-  `Search the indexed code graph for symbols (functions, classes, methods, interfaces, types, variables) by name or qualified name. Replaces 10+ grep calls per discovery task.
+  `Search the indexed code graph for symbols (functions, classes, methods, interfaces, types, variables) by name or qualified name. The structural-search entry point: returns resolved symbol IDs (with fanIn/fanOut ranking) that every other read-path tool accepts — grep returns text matches, query_symbols returns graph nodes.
 
 Two match modes: "trigram" (default, pg_trgm similarity — best for fuzzy / typo-tolerant / unique-symbol lookups), "substring" (ILIKE %q% — best for broad listings like every "Handler" or "Controller" in the repo; results ranked by fanIn + fanOut so central ones float to the top).
 
@@ -853,7 +876,7 @@ Side effects: NONE — read-only. Prerequisites: Tentra API auth + at least one 
 
 server.tool(
   'get_symbol_neighbors',
-  `Breadth-first traverse the code graph starting from one symbol to return its local neighborhood: what it calls, what calls it, what it imports, inheritance / implementation relationships. Eliminates 20+ file-reads per "how does this work?" question.
+  `Breadth-first traverse the code graph starting from one symbol to return its local neighborhood: what it calls, what calls it, what it imports, inheritance / implementation relationships. Answers "how does this work?" structurally — grep finds the symbol; get_symbol_neighbors tells you what it actually depends on.
 
 Unlike find_references (which only returns direct callers = depth-1 inbound), get_symbol_neighbors walks OUTBOUND by default and can go deeper (up to depth=5) and bidirectional (direction="both"). Unlike explain_code_path (which finds the shortest single path between two given symbols), this tool explores the neighborhood around ONE symbol without a target. Filter by edge_types to focus on just imports, just calls, just inheritance, etc.
 
@@ -1072,6 +1095,19 @@ Use proactively in code review: before changing a service, fetch its decisions t
 Prerequisites: Tentra API auth + a valid entity_id matching the chosen entity_type. Read-only. Response: { decisions: [{ id, slug, title, status, context, decision, consequences, createdAt, decidedAt, linkKind }], total }.`,
   GetDecisionsForSchema.shape,
   async (args) => { await ensureAuth(); return getDecisionsForHandler(args) }
+)
+
+// ─── Tool: get_spec_alignment ─────────────────────────────────────────────────
+
+server.tool(
+  'get_spec_alignment',
+  `Mid-implementation alignment check: given files you just changed and a saved architecture, return what the spec says about that work — which services those files belong to (via set_service_mapping), the spec's declared edges in/out of each, ADRs that motivate or constrain them, and drift signals (files outside the model, services with no surviving files).
+
+Use proactively DURING implementation, not after — call after each batch of edits to verify the agent stays inside the architectural envelope and surfaces existing decisions before re-litigating them. Unlike sync_architecture (post-hoc, whole-repo drift report), this is a targeted lookup for a small set of changed files. Unlike get_decisions_for (one entity at a time), this joins service mapping + spec edges + ADRs in one round-trip.
+
+Prerequisites: Tentra API auth + architecture_id you own + indexed snapshot with set_service_mapping applied to at least one service. Read-only. Response: { architecture_id, architecture_name, snapshot_id, services_touched: [{ service_id, responsibility, files, edges_in, edges_out, decisions }], unmapped_files: { not_in_snapshot, no_service_mapping }, orphan_services }.`,
+  GetSpecAlignmentSchema.shape,
+  async (args) => { await ensureAuth(); return getSpecAlignmentHandler(args) }
 )
 
 // ─── Tool: get_ownership ──────────────────────────────────────────────────────

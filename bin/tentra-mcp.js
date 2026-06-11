@@ -739,7 +739,9 @@ if (subcommand === 'reindex') {
   runReview().catch((e) => { err(e.message || String(e)); process.exit(1) })
 } else if (subcommand === 'help' || args.includes('--help') || args.includes('-h')) {
   console.log(`
-  tentra-mcp — Memory for AI coding agents. Persistent code graph + AI architecture diagrams.
+  tentra-mcp — AI-native architecture platform for engineering teams.
+  Describe systems → get interactive diagrams → export to 14 frameworks (Spring Boot, FastAPI, Go, Rust, ...).
+  Drift detection keeps diagrams in sync with code. Also includes a persistent code graph for AI coding agents.
 
   USAGE:
     npx tentra-mcp init                     # zero-config install for this repo's IDE(s)
@@ -762,7 +764,7 @@ if (subcommand === 'reindex') {
                    Markdown review to stdout. Pipe to \`gh pr comment -F -\` in
                    your CI to get auto-review on every PR.
     (default)      Start the MCP stdio server — connects to https://trytentra.com
-                   and exposes 33 tools to your IDE over stdio.
+                   and exposes 36 tools to your IDE over stdio.
 
   BACKEND MODES:
     --local        Use a local SQLite graph in ~/.tentra/graphs/{repoId}/db.sqlite.
@@ -780,13 +782,13 @@ if (subcommand === 'reindex') {
     --quiet          (reindex only) Suppress informational output
     --help, -h       Show this help
 
-  33 MCP TOOLS:
-    Architecture (9):      create / update / get / list / analyze / lint / sync / export / flow
+  36 MCP TOOLS:
+    Architecture (10):     create / update / get / list / analyze / lint / sync / spec_alignment / export / flow
     Code graph write (4):  index_code, index_code_continue, record_semantic_node, get_index_job
-    Code graph read (11):  query_symbols, find_references, get_symbol_neighbors,
-                           get_service_code_graph, explain_code_path, find_similar_code,
-                           record_embedding, list_god_nodes, get_quality_hotspots,
-                           list_snapshots, diff_snapshots
+    Code graph read (13):  query_symbols, find_references, safe_rename, explain_codebase,
+                           get_symbol_neighbors, get_service_code_graph, explain_code_path,
+                           find_similar_code, record_embedding, list_god_nodes,
+                           get_quality_hotspots, list_snapshots, diff_snapshots
     Enrichment (9):        contracts, decisions, ownership, domains
 
   GETTING STARTED (60-second version):
